@@ -1,0 +1,17 @@
+numpy<2.0,>=1.26.4
+opencv-python-headless==4.9.0.80
+stable-baselines3[extra]
+sentence-transformers==2.7.0
+
+# LLaVA's Exact Dependencies
+torch==2.1.2
+torchvision==0.16.2
+accelerate==0.21.0
+tokenizers==0.15.1
+
+# Other necessary packages
+transformers==4.37.2
+bitsandbytes
+scikit-learn
+requests
+regex
