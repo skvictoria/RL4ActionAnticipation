@@ -20,9 +20,9 @@ def llava_generate(value_model, tokenizer, input_ids, image_tensor, args):
     with torch.inference_mode():
         outputs = base.generate(
         inputs_embeds = inputs_embeds,
-        do_sample=True,
-        temperature=args.temperature,
-        num_beams=args.num_beams,
+        do_sample=False,#True,
+        temperature=None,#args.temperature,
+        num_beams=1,#args.num_beams,
         max_new_tokens=args.max_new_tokens,
         use_cache=True,
         output_scores=True,

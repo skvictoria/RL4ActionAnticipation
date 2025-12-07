@@ -94,10 +94,24 @@ class VLMPolicy(nn.Module):
         image_tensor = self.process_obs(inputs)
         if INPUT_IDS is None:
             INPUT_IDS = self.INPUT_IDS
+        safe_temp = max(float(self.args.temperature), 1e-3)
         value, action_log_prob, _ = llava_evaluate(value_model = self.value_model,
                                         input_ids = INPUT_IDS,
                                         output_ids = output_ids,
                                         image_tensor = image_tensor,
-                                        temperature = self.args.temperature,
+                                        temperature = safe_temp,
                                         thought_prob_coef = self.args.thought_prob_coef)
+        print(action_log_prob)
+        if torch.isnan(value).any() or torch.isnan(action_log_prob).any() or \
+        torch.isinf(value).any() or torch.isinf(action_log_prob).any():
+            print("[WARN] NaN/Inf detected in llava_evaluate outputs. "
+                "Sanitizing value and action_log_prob.")
+
+            value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+            action_log_prob = torch.nan_to_num(action_log_prob, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # log prob이 너무 크면 ratio 계산에서 또 터지니까 한 번 더 클램프
+        action_log_prob = action_log_prob.clamp(min=-50.0, max=50.0)
+        value = value.clamp(min=-1e4, max=1e4)
+
         return value, action_log_prob

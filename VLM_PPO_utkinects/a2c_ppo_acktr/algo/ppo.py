@@ -36,8 +36,13 @@ class PPO():
 
     def update(self, rollouts):
         advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
+        advantages = torch.nan_to_num(advantages, nan=0.0, posinf=0.0, neginf=0.0)
         advantages = (advantages - advantages.mean()) / (
             advantages.std() + 1e-5)
+        advantages = torch.nan_to_num(advantages, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+        print(advantages)
 
         value_loss_epoch = 0
         action_loss_epoch = 0
@@ -58,15 +63,25 @@ class PPO():
                         obs_batch, output_ids_batch)
                     # values and action_log_probs on two different devices!! because they come from two llava
                     if torch.isnan(action_log_probs).any():
+                        print("NaN in new action_log_probs, skip minibatch")
                         continue
                     old_action_log_probs_batch = old_action_log_probs_batch.to(action_log_probs.device).view(-1)
                     adv_targ = adv_targ.to(action_log_probs.device)
                     value_preds_batch = value_preds_batch.to(values.device)
                     return_batch = return_batch.to(values.device)
+                    if (
+                        torch.isnan(values).any()
+                        or torch.isnan(old_action_log_probs_batch).any()
+                        or torch.isnan(adv_targ).any()
+                        or torch.isnan(return_batch).any()
+                    ):
+                        print("NaN in values/old_log_probs/adv/returns, skip minibatch")
+                        continue
 
-
-                    ratio = torch.exp(action_log_probs -
-                                    old_action_log_probs_batch)
+                    # ratio = torch.exp(action_log_probs -
+                    #                 old_action_log_probs_batch)
+                    log_ratio = (action_log_probs - old_action_log_probs_batch).clamp(-20, 20)
+                    ratio = torch.exp(log_ratio)
 
                     surr1 = ratio * adv_targ
                     surr2 = torch.clamp(ratio, 1.0 - self.clip_param,

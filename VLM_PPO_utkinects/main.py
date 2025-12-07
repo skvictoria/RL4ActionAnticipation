@@ -98,8 +98,10 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_path, cache_dir=cache_dir)
     value_model = VLMValue(base=llava_model)
     prompt_text = (
-        "You are an AI assistant for action recognition. Observe the image. "
-        "First, provide a chain of thought for what action is happening. "
+        "You are an AI assistant for action recognition. "
+        f"Your job is to classify the image into one of these categories of action: {', '.join(ACTION_LIST)}\n"
+        "First, Observe the image. "
+        "Second, provide a chain of thought for what detailed, fine-grained action is happening. Try to catch the object's hidden intention of the action as possible. "
         f"Then, classify the action into one of these categories: {', '.join(ACTION_LIST)}\n"
         "Format your response EXACTLY as follows:\n"
         "THOUGHT: [Your reasoning here].\n"
@@ -114,7 +116,9 @@ def main():
     def text_to_action_index(text_action):
         try:
             # 여러 줄의 응답 중 마지막 줄에 액션이 있다고 가정
-            action_str = text_action.strip().split('\n')[-1]
+            action_str = text_action[0].strip().split('\n')[-1]
+            action_str = action_str.split(' ')[-1].replace(' ', '')
+            action_str = action_str.replace('.', '')
             return ACTION_LIST.index(action_str)
         except:
             return ACTION_LIST.index("UNDEFINED") # 파싱 실패 시 'UNDEFINED'로 처리
@@ -150,6 +154,8 @@ def main():
     rollouts.obs[0].copy_(obs)
     rollouts.to(device)
     episode_rewards = deque(maxlen=10)
+    # 프로세스별로 현재 에피소드의 누적 보상 저장
+    #running_episode_rewards = np.zeros(args.num_processes, dtype=np.float32)
     start = time.time()
     num_updates = int(args.num_env_steps) // args.num_steps // args.num_processes
 
@@ -160,7 +166,7 @@ def main():
 
             # LLaVA 응답을 파싱하여 CoT 보상을 계산합니다.
             llava_response = tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
-            print("llava response: ", llava_response)
+            #print("llava response: ", llava_response)
             try:
                 thought = llava_response.split("THOUGHT:")[1].split("ACTION:")[0].strip()
             except Exception:
@@ -174,18 +180,36 @@ def main():
                 cot_reward = util.pytorch_cos_sim(thought_embedding, action_embedding).item()
             else:
                 cot_reward = -1.0
-            
+            print(cot_reward)
+            print(action)
             # 환경을 step하고, 보상을 CoT 보상으로 덮어씁니다.
             # action을 텐서 형태로 전달해야 합니다.
             obs, _, done, infos = envs.step(torch.tensor([action]).to(device))
             reward = torch.tensor([[cot_reward]], device=device)
 
-            # 결과 저장
-            for info in infos:
-                if 'episode' in info.keys():
-                    episode_rewards.append(info['episode']['r'])
+            # # 결과 저장
+            # for info in infos:
+            #     print(info)
+            #     if 'episode' in info.keys():
+            #         print("episode in info")
+            #         episode_rewards.append(info['episode']['r'])
+            if isinstance(done, torch.Tensor):
+                done_np = done.cpu().numpy()
+            else:
+                done_np = np.array(done, dtype=bool)
+            done_np = np.atleast_1d(done_np)
+            # reward는 여기선 모든 프로세스에 같은 cot_reward 하나만 있는 구조일 수도 있음
+            # num_processes=1 이라면 단순히:
+            #running_episode_rewards += cot_reward
+            episode_rewards.append(cot_reward)
+            # # 각 프로세스별 done 체크
+            # for i, d in enumerate(done_np):
+            #     print(i,d)
+            #     if d:
+            #         episode_rewards.append(running_episode_rewards[i])
+            #         running_episode_rewards[i] = 0.0  # 다음 에피소드 시작
 
-            masks = torch.FloatTensor([[0.0] if d else [1.0] for d in done])
+            masks = torch.FloatTensor([[0.0] if d else [1.0] for d in done_np])
             bad_masks = torch.FloatTensor([[1.0]])
 
             # insert(self, obs, output_ids, actions, action_log_probs, value_preds, rewards, masks, bad_masks)
@@ -204,8 +228,17 @@ def main():
         with torch.no_grad():
             next_value = accelerator.unwrap_model(actor_critic).get_value(rollouts.obs[-1])
 
+        print("has_nan next_value:        ", torch.isnan(next_value).any().item())
+        print("has_nan value_preds:       ", torch.isnan(rollouts.value_preds).any().item())
+        print("has_nan rewards:           ", torch.isnan(rollouts.rewards).any().item())
+        print("has_nan masks:             ", torch.isnan(rollouts.masks).any().item())
+        print("has_nan bad_masks:         ", torch.isnan(rollouts.bad_masks).any().item())
+        print("has_nan returns(before):   ", torch.isnan(rollouts.returns).any().item())
+
         rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.gae_lambda, args.use_proper_time_limits)
-        
+
+        print("has_nan returns(after):    ", torch.isnan(rollouts.returns).any().item())
+    
         value_loss, action_loss, dist_entropy = agent.update(rollouts)
         rollouts.after_update()
 
