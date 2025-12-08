@@ -5,18 +5,13 @@ import numpy as np
 import math
 import os
 import sys
-import pdb
 from einops import repeat, rearrange
 from model.extras.transformer import Transformer
 from model.extras.position import PositionalEncoding
-import copy
 
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 
 class FUTR(nn.Module):
-    # 50salads: query_num: 19
-    # Breakfast: query_num: 49
-    # Darai: query_num: 48
     def __init__(self, n_class, hidden_dim, src_pad_idx, device, args, n_query=8, n_head=8,
                  num_encoder_layers=6, num_decoder_layers=6, query_num=49):
         super().__init__()
@@ -32,11 +27,13 @@ class FUTR(nn.Module):
         self.args = args
         nn.init.xavier_uniform_(self.input_embed.weight)
         self.l3_attention = nn.MultiheadAttention(hidden_dim, n_head, batch_first=True)
-        self.query_attention = nn.MultiheadAttention(hidden_dim, n_head, batch_first=True)
         
+        # New Projector for VLM Context (CLIP dim 512 -> hidden_dim)
+        self.context_projector = nn.Linear(512, hidden_dim)
+        nn.init.xavier_uniform_(self.context_projector.weight)
 
         if args.seg :
-            self.fc_seg = nn.Linear(hidden_dim, n_class) #except SOS, EOS
+            self.fc_seg = nn.Linear(hidden_dim, n_class)
             nn.init.xavier_uniform_(self.fc_seg.weight)
 
         if args.anticipate :
@@ -50,7 +47,6 @@ class FUTR(nn.Module):
         max_seq_len = args.max_pos_len
         self.pos_embedding = nn.Parameter(torch.zeros(1, max_seq_len, hidden_dim))
         nn.init.xavier_uniform_(self.pos_embedding)
-        # Sinusoidal position encoding
         self.pos_enc = PositionalEncoding(hidden_dim)
         self.positional_embedding_l3 = self.sinusoidal_positional_encoding(max_seq_len, hidden_dim)
         self.positional_embedding_l3 = self.positional_embedding_l3.to(self.device)
@@ -59,32 +55,29 @@ class FUTR(nn.Module):
             self.gt_emb = nn.Embedding(n_class+2, self.hidden_dim, padding_idx=n_class+1)
             nn.init.xavier_uniform_(self.gt_emb.weight)
 
-
     def sinusoidal_positional_encoding(self, seq_len, emb_dim):
         position = torch.arange(seq_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, emb_dim, 2) * -(math.log(10000.0) / emb_dim))
         pos_embed = torch.zeros(seq_len, emb_dim)
-        pos_embed[:, 0::2] = torch.sin(position * div_term) # apply sine to even indices
-        pos_embed[:, 1::2] = torch.cos(position * div_term) # apply cosine to odd indices
+        pos_embed[:, 0::2] = torch.sin(position * div_term)
+        pos_embed[:, 1::2] = torch.cos(position * div_term)
         return pos_embed
 
-
-    def forward(self, inputs, query, mode='train', epoch=0, idx=0):
+    def forward(self, inputs, query=None, context=None, mode='train', epoch=0, idx=0):
+        # inputs: visual features
+        # context: (Optional) Fine-grained embeddings from VLM [B, 512]
+        
         if mode == 'train' :
             src, src_label = inputs
-            tgt_key_padding_mask = None
             src_key_padding_mask = get_pad_mask(src_label, self.src_pad_idx).to(self.device)
-            memory_key_padding_mask = src_key_padding_mask.clone().to(self.device)
         else :
             src = inputs
             src_key_padding_mask = None
-            memory_key_padding_mask = None
-            tgt_key_padding_mask = None
 
         tgt_mask = None
         if self.args.input_type == 'i3d_transcript':
             B, S, C = src.size()
-            src = self.input_embed(src) #[B, S, C]
+            src = self.input_embed(src) 
         elif self.args.input_type == 'gt':
             B, S = src.size()
             src = self.gt_emb(src)
@@ -92,59 +85,54 @@ class FUTR(nn.Module):
         
         src = self.pos_enc(src)
        
-        pos_embed_l3 = self.positional_embedding_l3.unsqueeze(0) # (1, 2000, 128)
-        pos_embed_l3 = pos_embed_l3[:, :S,] # (1, 537, 128)
+        pos_embed_l3 = self.positional_embedding_l3.unsqueeze(0)
+        pos_embed_l3 = pos_embed_l3[:, :S,]
         
         pos = self.pos_embedding[:, :S,].repeat(B, 1, 1)
         src = rearrange(src, 'b t c -> t b c')
 
-        ######## ADDING #########
         src_l3, _ = self.l3_attention(src, src, src) 
         src_l3 = rearrange(src_l3, 't b c -> b t c')
         l3_logits = pos_embed_l3.to(self.device) + src_l3
-        #########################
 
+        # Base Action Query from Visual Features
+        action_query = l3_logits
+        action_query = F.adaptive_avg_pool1d(action_query.permute(0, 2, 1), self.n_query).permute(0, 2, 1) # [B, n_query, hidden]
 
-        ######################### Multi-modal ###########################
-        action_query = l3_logits# + rearrange(src, 't b c -> b t c')
-        action_query = F.adaptive_avg_pool1d(action_query.permute(0, 2, 1), self.n_query).permute(0, 2, 1)
-        #################################################################
+        # Inject VLM Context (Fine-grained Label) if provided
+        if context is not None:
+            # context: [B, 512] -> [B, hidden]
+            ctx_emb = self.context_projector(context)
+            # Add to action_query (broadcast over n_query)
+            action_query = action_query + ctx_emb.unsqueeze(1)
 
         pos = rearrange(pos, 'b t c -> t b c')
-        action_query = rearrange(action_query, 'b t c -> t b c') #(8, 8, 128)
+        action_query = rearrange(action_query, 'b t c -> t b c') 
         tgt = torch.zeros_like(action_query)
 
-        src, tgt = self.transformer(src=src, tgt=tgt, mask=src_key_padding_mask, tgt_mask=tgt_mask, tgt_key_padding_mask=None, query_embed=action_query, pos_embed=pos, tgt_pos_embed=None, epoch=epoch, idx=idx)
+        src, tgt = self.transformer(src=src, tgt=tgt, mask=src_key_padding_mask, tgt_mask=tgt_mask, 
+                                    tgt_key_padding_mask=None, query_embed=action_query, 
+                                    pos_embed=pos, tgt_pos_embed=None, epoch=epoch, idx=idx)
 
-        tgt = rearrange(tgt, 't b c -> b t c') # (8, 655, 128) -> [4, 5, 128]
+        tgt = rearrange(tgt, 't b c -> b t c')
         src = rearrange(src, 't b c -> b t c')
-
         
         output = dict()
         if self.args.anticipate :
-            # action anticipation
             output_class = self.fc(tgt) 
-            duration = self.fc_len(tgt) #[B, T, 1]
-            duration = duration.squeeze(2) #[B, T]
+            duration = self.fc_len(tgt)
+            duration = duration.squeeze(2)
             output['duration'] = duration
             output['action'] = output_class
 
         if self.args.seg :
-            # action segmentation
             tgt_seg = self.fc_seg(src)
-            #tgt_seg = self.fc_l3(src)
             output['seg'] = tgt_seg
 
-        #############ADDING ################
         l3_logits = self.fc_l3(l3_logits)
-        #l3_logits = self.fc_seg(l3_logits)
         output['l3'] = l3_logits
 
         return output
 
-
 def get_pad_mask(seq, pad_idx):
     return (seq ==pad_idx)
-
-
-

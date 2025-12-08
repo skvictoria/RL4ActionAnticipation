@@ -125,7 +125,7 @@ def semantic_reward_from_text(text_actions: List[str], infos, env_name: str, cli
     return torch.tensor(rewards).unsqueeze(1)
 
 
-def get_prompt(env_name, action_only, infos = None):
+def get_prompt(env_name, action_only, infos = None, predicted_history=None):
     """
         This function defines the prompt for the text-to-action task, depending on the environments
         env_name: determines the prompts for each environment
@@ -187,7 +187,10 @@ def get_prompt(env_name, action_only, infos = None):
     elif 'utkinect' in env_name.lower():
         display_actions = list(UTKINECT_DISPLAY.values())
         history = []
-        if infos and len(infos) > 0 and isinstance(infos[0], dict):
+        
+        if predicted_history is not None:
+            history = [UTKINECT_DISPLAY.get(_normalize_label(act), act) for act in predicted_history]
+        elif infos and len(infos) > 0 and isinstance(infos[0], dict):
             raw_history = infos[0].get("action_history", [])
             history = [UTKINECT_DISPLAY.get(_normalize_label(act), act) for act in raw_history]
         history_text = ', '.join(history) if history else 'None'
@@ -199,6 +202,7 @@ def get_prompt(env_name, action_only, infos = None):
             qs = qs + "\"fine-grained description corresponding to each frame\": [\"label_0\", \"label_1\", ...], \n"
             qs = qs + "\"thoughts\": \"{describe what the person is doing and reason about the corresponding fine-grained description}\", \n"
         #qs = qs + f"\"action\": \"one of {display_actions}\" \n}}"
+    
     return qs
 
 # Define the function that processes the list of strings according to the specified rules

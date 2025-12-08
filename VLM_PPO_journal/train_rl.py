@@ -7,132 +7,153 @@ import copy
 import time
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from a2c_ppo_acktr import utils, rl_utils
-from a2c_ppo_acktr.rl_utils import get_prompt
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from a2c_ppo_acktr.rl_utils import get_prompt, _clip_safe_tokenize
+from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
 from llava.conversation import conv_templates
 from llava.mm_utils import tokenizer_image_token
-try:
-    from accelerate.utils.memory import clear_device_cache  # noqa: F401
-except (ImportError, AttributeError):
-    import accelerate.utils.memory as accelerate_memory
-
-    if not hasattr(accelerate_memory, "clear_device_cache"):
-        def clear_device_cache():
-            return None
-        accelerate_memory.clear_device_cache = clear_device_cache
-import transformers
-from tqdm import tqdm
 import accelerate
+from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore")
 
-def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, running_episode_rewards, episode_success_rate, episode_action_tokens_log_prob, agent, lr_scheduler, start, j, num_updates, clip_model):
+# [NEW] FUTR Warmup Function
+def warmup_futr(args, envs, joint_model, num_steps=500):
+    print(f"\n****** [Warmup] Starting FUTR Warmup for {num_steps} steps... ******")
+    
+    # Ensure envs are ready (get initial infos)
+    infos = envs.get_current_infos()
+    if infos is None:
+        envs.reset()
+        infos = envs.get_current_infos()
+
+    total_loss = 0
+    device = joint_model.device
+    
+    for step in range(num_steps):
+        # Dummy action (UTKinect environment ignores action input anyway)
+        action = torch.zeros((args.num_processes, 1)).long().to(device)
+        
+        # Step environment to get new frames and GT
+        obs, reward, done, infos = envs.step(action)
+        
+        # Train FUTR using ONLY Visual features (Visual -> Coarse/Future)
+        # fg_embedding is None, so it learns the base task first.
+        loss = joint_model.train_step(infos, fg_embedding=None)
+        total_loss += loss
+        
+        if (step + 1) % 50 == 0:
+            print(f"[Warmup] Step {step+1}/{num_steps} | Avg Loss: {total_loss/50:.4f}")
+            total_loss = 0
+            
+    print("****** [Warmup] FUTR Warmup Complete. Model weights initialized. ******\n")
+
+
+def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, running_episode_rewards, episode_success_rate, episode_action_tokens_log_prob, agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=None):
 
     for step in range(args.num_steps):
-        # Sample actions
-        with torch.no_grad():
-            INPUT_IDS = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0)
-            INPUT_IDS[INPUT_IDS == 0] = 259 # 869: . (period), 29871: SPIECE, 259: whitespace
-            value, output_id, action, action_log_prob, action_tokens_log_prob, text_outputs = actor_critic.act(
-                    rollouts.obs[step], INPUT_IDS = INPUT_IDS)
-        text_action = text_outputs[0] if text_outputs else ""
-        prev_infos = copy.deepcopy(infos)
-        obs, reward, done, infos = envs.step(action)
-        print("semantic reward info: ", text_outputs)
-        print("prev info: ", prev_infos)
-        ## TODO: Add semantic reward with coarse action prediction
-        semantic_reward = rl_utils.semantic_reward_from_text(
-            text_outputs, prev_infos, args.env_name, clip_model, reward.device)
-        reward = semantic_reward.to(reward.device)
-        if step % 50 == 0 or step == args.num_steps - 1:
-            print(f"[collect] update {j+1}/{num_updates}, step {step+1}/{args.num_steps}, action {text_action}")
+        
+        # --- [Step 1] FUTR Predicts Coarse Labels (for Prompt) ---
+        predicted_history = None
+        if joint_model is not None and 'utkinect' in args.env_name.lower():
+            # Use 'predict_coarse' (Correct method name)
+            pred_hist_list = joint_model.predict_coarse(infos)
+            predicted_history = pred_hist_list[0] if pred_hist_list else []
 
-        qs = get_prompt(args.env_name, args.action_only_prompt, infos)
+        # --- Generate Prompt with FUTR's Coarse Prediction ---
+        qs = get_prompt(args.env_name, args.action_only_prompt, infos, predicted_history=predicted_history)
         qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
         conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
-        masks = torch.FloatTensor(
-            [[0.0] if done_ else [1.0] for done_ in done])
+        curr_prompt = conv.get_prompt()
 
+        # --- [Step 2] VLM Predicts Fine-grained Labels ---
+        with torch.no_grad():
+            INPUT_IDS = tokenizer_image_token(curr_prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0)
+            INPUT_IDS[INPUT_IDS == 0] = 259 
+            value, output_id, action, action_log_prob, action_tokens_log_prob, text_outputs = actor_critic.act(
+                    rollouts.obs[step], INPUT_IDS = INPUT_IDS)
+        
+        text_action = text_outputs[0] if text_outputs else ""
+        prev_infos = copy.deepcopy(infos)
+        
+        # Environment Step
+        obs, reward, done, infos = envs.step(action)
+        
+        # Calculate Reward
+        semantic_reward = rl_utils.semantic_reward_from_text(
+            text_outputs, prev_infos, args.env_name, clip_model, reward.device)
+        reward = semantic_reward.to(reward.device)
+        
+        if step % 50 == 0 or step == args.num_steps - 1:
+            print(f"[collect] update {j+1}/{num_updates}, step {step+1}/{args.num_steps}")
+
+        # --- [Step 3] Joint Training: FUTR Predicts Future ---
+        futr_loss = 0.0
+        if joint_model is not None:
+            # 1. Encode VLM output
+            fg_embeds = []
+            clip_model = clip_model.to(reward.device).eval()
+            for txt in text_outputs:
+                # Basic cleaning
+                try:
+                    clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
+                except:
+                    clean_txt = txt
+                print("-------------")
+                print("clean text: ", clean_txt)
+                print("-------------")
+                tokens = _clip_safe_tokenize(clean_txt, reward.device)
+                with torch.no_grad():
+                    emb = clip_model.encode_text(tokens) 
+                    fg_embeds.append(emb.squeeze(0))
+            
+            if fg_embeds:
+                fg_tensor = torch.stack(fg_embeds) 
+                # 2. Train FUTR
+                futr_loss = joint_model.train_step(prev_infos, fg_tensor)
+
+        # Store in Rollouts
+        masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
+        bad_masks = torch.FloatTensor([[0.0] if 'bad_transition' in info.keys() else [1.0] for info in infos])
+        
         running_episode_rewards += reward.flatten()
         for i, d, r in zip(range(args.num_processes), done, reward):
-            print("num process: ", i, "done: ", d, "reward: ", r)
             if d:
-                print("d----")
                 episode_rewards.append(running_episode_rewards[i].item())
                 if running_episode_rewards[i] > 0:
-                    print("running episode resards more than 0")
                     episode_success_rate.append(1)
                 else:
                     episode_success_rate.append(0)
                 episode_action_tokens_log_prob.append(action_tokens_log_prob[i].item())
                 running_episode_rewards[i] = 0
-        # bad_mask is a legacy implementation of the storage.py file
-        bad_masks = torch.FloatTensor(
-            [[0.0] if 'bad_transition' in info.keys() else [1.0] for info in infos])
+        
         rollouts.insert(obs, output_id, action,
                         action_log_prob, value, reward, masks, bad_masks)
 
-    print("****** iteration number:{} ******".format(j))
-    print("prompt:{}".format(prompt))
-    print("text_action:{}".format(text_action))
-    print("current observation:{}".format(prev_infos))
-    print("ground truth:{}".format(infos))
-    print("action log prob:{}".format(action_log_prob))
-    print("action tokens log prob:{}".format(action_tokens_log_prob))
+    print(f"****** iteration number: {j} | FUTR Loss: {futr_loss:.4f} ******")
+    
     with torch.no_grad():
-        next_value = actor_critic.get_value(
-            rollouts.obs[-1]).detach()
+        pred_hist_next = []
+        if joint_model:
+            pred_hist_next = joint_model.predict_coarse(infos)[0] 
+            
+        qs = get_prompt(args.env_name, args.action_only_prompt, infos, predicted_history=pred_hist_next)
+        qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
+        conv = conv_templates[args.conv_mode].copy()
+        conv.append_message(conv.roles[0], qs)
+        conv.append_message(conv.roles[1], None)
+        next_prompt = conv.get_prompt()
+        
+        NEXT_INPUT_IDS = tokenizer_image_token(next_prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0)
+        NEXT_INPUT_IDS[NEXT_INPUT_IDS == 0] = 259
+        
+        next_value = actor_critic.get_value(rollouts.obs[-1], INPUT_IDS=NEXT_INPUT_IDS).detach()
 
     rollouts.compute_returns(next_value, args.use_gae, args.gamma,
                                 args.gae_lambda, args.use_proper_time_limits)
     value_loss, action_loss, dist_entropy = agent.update(rollouts)
     lr_scheduler.step()
-    print(f"[update] iteration {j+1}/{num_updates} complete. value_loss={value_loss:.4f}, action_loss={action_loss:.4f}")
-
+    
     rollouts.after_update()
-    if len(episode_rewards) > 1:
-        print("episode rewards length more than 1")
-        total_num_steps = (j + 1) * args.num_processes * args.num_steps
-        end = time.time()
-
-        print(
-            "Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.2f}/{:.2f}, min/max reward {:.2f}/{:.2f}, success_rate {:.2f}\n"
-            .format(j, total_num_steps,
-                    int(total_num_steps / (end - start)),
-                    len(episode_rewards), np.mean(episode_rewards),
-                    np.median(episode_rewards), np.min(episode_rewards),
-                    np.max(episode_rewards), np.mean(episode_success_rate),
-                    dist_entropy, value_loss, action_loss))
-        if args.use_wandb:
-            print("using wandb")
-            wandb.log({"iteration": j,
-                    "num_timesteps": total_num_steps,
-                    "FPS": int(total_num_steps / (end - start)),
-                    "episode_reward.mean": np.mean(episode_rewards),
-                    "episode_reward.median": np.median(episode_rewards),
-                    "episode_reward.min": np.min(episode_rewards),
-                    "episode_reward.max": np.max(episode_rewards),
-                    "episode_success_rate.mean": np.mean(episode_success_rate),
-                    "episode_action_tokens_log_prob.mean": np.mean(episode_action_tokens_log_prob),
-                    "distribution_entropy": dist_entropy,
-                    "value.loss": value_loss,
-                    "action.loss": action_loss,
-                    "reward.max": rollouts.rewards.max().item(),
-                    "reward.min": rollouts.rewards.min().item(),
-                    "reward.mean": rollouts.rewards.mean().item(),
-                    "reward.std": rollouts.rewards.std().item(),
-                    "reward.median": rollouts.rewards.median().item(),
-                    "return.max": rollouts.returns.max().item(),
-                    "return.min": rollouts.returns.min().item(),
-                    "return.mean": rollouts.returns.mean().item(),
-                    "return.std": rollouts.returns.std().item(),
-                    "value.max": rollouts.value_preds.max().item(),
-                    "value.min": rollouts.value_preds.min().item(),
-                    "value.mean": rollouts.value_preds.mean().item(),
-                    "value.std": rollouts.value_preds.std().item(),})

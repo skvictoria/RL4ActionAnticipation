@@ -9,6 +9,7 @@ import glob
 import os
 import time
 from collections import deque
+import sys
 
 import gymnasium as gym
 import numpy as np
@@ -26,11 +27,11 @@ from a2c_ppo_acktr.storage import RolloutStorage
 from a2c_ppo_acktr.llava_interface import llava_evaluate, llava_generate
 from a2c_ppo_acktr.llava_interface import init_pretrained_model, find_all_linear_names, load_lora_model
 
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from llava.conversation import conv_templates, SeparatorStyle
+from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
+from llava.conversation import conv_templates
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
-from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
+from llava.mm_utils import tokenizer_image_token
 from llava.model import LlavaLlamaForCausalLM
 from llava.model.language_model.llava_mistral import LlavaMistralForCausalLM
 
@@ -39,7 +40,8 @@ import random
 from functools import partial
 from typing import List, Optional
 
-from train_rl import train
+from train_rl import train, warmup_futr # [NEW] Import warmup function
+from joint_model import JointFUTR
 
 import clip
 clip_model, _ = clip.load("ViT-B/32", device='cuda:0')
@@ -47,10 +49,9 @@ for param in clip_model.parameters():
     param.requires_grad = False
 
 try:
-    from accelerate.utils.memory import clear_device_cache  # noqa: F401
+    from accelerate.utils.memory import clear_device_cache
 except (ImportError, AttributeError):
     import accelerate.utils.memory as accelerate_memory
-
     if not hasattr(accelerate_memory, "clear_device_cache"):
         def clear_device_cache():
             return None
@@ -59,14 +60,14 @@ except (ImportError, AttributeError):
 from peft import LoraConfig, get_peft_model
 from transformers import AutoTokenizer, AutoImageProcessor
 import transformers
-
 from tqdm import tqdm
-
 import accelerate
 from accelerate.state import AcceleratorState
-
 import warnings
 warnings.filterwarnings("ignore")
+
+FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251208/"
+
 
 def main():
     args = get_args()
@@ -82,15 +83,13 @@ def main():
 
     accelerator = accelerate.Accelerator(gradient_accumulation_steps=args.grad_accum_steps)
     device = accelerator.device
-    ## environment interaction device is cpu
     model_device = device
 
-    #initialization of llava
+    # initialization of llava
     model_path = args.model_path
     cache_dir = args.cache_dir
-
     print(model_path)
-    #load_pretrained_model(model_path, model_path, model_path)
+
     if "lora" in model_path:
         base, tokenizer = load_lora_model(model_path, cache_dir=cache_dir)
         if args.q8 or args.q4:
@@ -162,6 +161,13 @@ def main():
             "frame_skip": args.utkinect_frame_skip,
         }
 
+    # Initialize Joint FUTR Model
+    joint_model = None
+    if utkinect_enabled:
+                
+        # Initialize
+        joint_model = JointFUTR(device, dataset_root, model_path=FUTR_MODEL_PATH, lr=1e-5)
+
     if "gym_cards" in args.env_name.lower():
         import gym_cards  # noqa: F401
         envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
@@ -174,13 +180,26 @@ def main():
         print("Environment not supported")
         exit(1)
 
+    # [NEW] Warmup FUTR if enabled
+    # This prevents collapse to NONE label by training on GT data first
+    if joint_model is not None:
+        warmup_futr(args, envs, joint_model, num_steps=500)
 
+    # Reset envs for main training loop
     obs = envs.reset()
     infos = envs.get_current_infos()
     if infos is None:
         infos = [{} for _ in range(args.num_processes)]
+    
+    # Initial Prediction for Prompt
+    predicted_history = None
+    if joint_model:
+        # [FIX] Use predict_coarse instead of predict_batch
+        pred_hist_list = joint_model.predict_coarse(infos)
+        predicted_history = pred_hist_list[0] if pred_hist_list else []
+
     ## Inputing Prompt here
-    qs = get_prompt(args.env_name, args.action_only_prompt, infos)
+    qs = get_prompt(args.env_name, args.action_only_prompt, infos, predicted_history=predicted_history)
     qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
     conv = conv_templates[args.conv_mode].copy()
     conv.append_message(conv.roles[0], qs)
@@ -201,7 +220,6 @@ def main():
                              args=args)
     optimizer = optim.Adam(actor_critic.value_model.parameters(), lr=args.init_lr, eps=args.eps, weight_decay=args.weight_decay)
 
-    # https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.CosineAnnealingLR.html
     lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.lr_max_steps, eta_min=args.end_lr)
 
     AcceleratorState().deepspeed_plugin.deepspeed_config['train_micro_batch_size_per_gpu'] = 1
@@ -247,8 +265,16 @@ def main():
 
     num_explore = int(args.explore_portion*num_updates)
     prev_infos = copy.deepcopy(infos)
+
+    os.makedirs(FUTR_MODEL_PATH, exist_ok=True)
+    
     for j in tqdm(range(num_updates)):
-        train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, running_episode_rewards, episode_success_rate, episode_action_tokens_log_prob, agent, lr_scheduler, start, j, num_updates, clip_model)
+        train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, 
+              running_episode_rewards, episode_success_rate, episode_action_tokens_log_prob, 
+              agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=joint_model)
+        if joint_model is not None and (j % 5 == 0):
+            save_path = os.path.join(FUTR_MODEL_PATH, f"futr_joint_epoch_{j}.ckpt")
+            joint_model.save_model(save_path)
 
 if __name__ == "__main__":
     main()
