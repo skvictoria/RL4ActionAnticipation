@@ -10,7 +10,7 @@ import os
 import time
 from collections import deque
 import sys
-
+import re
 import gymnasium as gym
 import numpy as np
 import torch
@@ -66,10 +66,11 @@ from accelerate.state import AcceleratorState
 import warnings
 warnings.filterwarnings("ignore")
 
-FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251208/"
 
 
 def main():
+    FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251208/futr_joint_epoch_5.ckpt"
+
     args = get_args()
 
     torch.manual_seed(args.seed)
@@ -163,8 +164,21 @@ def main():
 
     # Initialize Joint FUTR Model
     joint_model = None
+    start_epoch = 0
     if utkinect_enabled:
-                
+        # 경로가 존재하는지 확인 후 로드
+        if not os.path.exists(FUTR_MODEL_PATH):
+            print(f"Warning: FUTR_MODEL_PATH {FUTR_MODEL_PATH} does not exist. Using random initialization.")
+            FUTR_MODEL_PATH = None
+        else:
+            # [NEW] 파일명에서 Epoch 번호 추출 (예: ...epoch_5.ckpt -> 5)
+            match = re.search(r'epoch_(\d+)', os.path.basename(FUTR_MODEL_PATH))
+            if match:
+                loaded_epoch = int(match.group(1))
+                start_epoch = loaded_epoch + 1
+                print(f"[Main] Resuming training from epoch {start_epoch} (Loaded: {loaded_epoch})")
+            else:
+                print("[Main] Could not parse epoch from filename. Starting from 0.")
         # Initialize
         joint_model = JointFUTR(device, dataset_root, model_path=FUTR_MODEL_PATH, lr=1e-5)
 
@@ -182,7 +196,7 @@ def main():
 
     # [NEW] Warmup FUTR if enabled
     # This prevents collapse to NONE label by training on GT data first
-    if joint_model is not None:
+    if joint_model is not None and start_epoch == 0:
         warmup_futr(args, envs, joint_model, num_steps=500)
 
     # Reset envs for main training loop
@@ -266,13 +280,14 @@ def main():
     num_explore = int(args.explore_portion*num_updates)
     prev_infos = copy.deepcopy(infos)
 
-    os.makedirs(FUTR_MODEL_PATH, exist_ok=True)
+    if not os.path.exists(FUTR_MODEL_PATH):
+        os.makedirs(FUTR_MODEL_PATH, exist_ok=True)
     
-    for j in tqdm(range(num_updates)):
+    for j in tqdm(range(start_epoch, num_updates)):
         train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, 
               running_episode_rewards, episode_success_rate, episode_action_tokens_log_prob, 
               agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=joint_model)
-        if joint_model is not None and (j % 5 == 0):
+        if joint_model is not None and (j % 1 == 0):
             save_path = os.path.join(FUTR_MODEL_PATH, f"futr_joint_epoch_{j}.ckpt")
             joint_model.save_model(save_path)
 

@@ -56,10 +56,18 @@ class JointFUTR:
             state_dict = torch.load(model_path, map_location=device)
             new_state_dict = {}
             for k, v in state_dict.items():
+                # 'module.' 접두사 제거
                 key = k.replace('module.', '')
-                if 'context_projector' not in key:
-                    new_state_dict[key] = v
-            self.model.load_state_dict(new_state_dict, strict=False)
+                
+                # [중요] 기존의 'context_projector' 필터링 로직 제거
+                # 이제 파일 안에 해당 키가 있으면 불러오고, 없으면 건너뜁니다.
+                new_state_dict[key] = v
+            
+            # strict=False로 설정하여, 
+            # 1) Base 모델 로딩 시: context_projector 키가 없어도 에러 없이 넘어감 (랜덤 초기화 유지)
+            # 2) Joint 모델 로딩 시: 모든 키를 정상적으로 로드함
+            msg = self.model.load_state_dict(new_state_dict, strict=False)
+            print(f"[JointFUTR] Weights loaded. Missing keys (expected for Base model): {msg.missing_keys}")
         else:
             print("[JointFUTR] No checkpoint found or provided. Training from scratch.")
 

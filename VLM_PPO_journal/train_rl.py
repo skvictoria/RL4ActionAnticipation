@@ -101,9 +101,9 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                     clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
                 except:
                     clean_txt = txt
-                print("-------------")
-                print("clean text: ", clean_txt)
-                print("-------------")
+                # print("-------------")
+                # print("clean text: ", clean_txt)
+                # print("-------------")
                 tokens = _clip_safe_tokenize(clean_txt, reward.device)
                 with torch.no_grad():
                     emb = clip_model.encode_text(tokens) 
