@@ -69,7 +69,7 @@ warnings.filterwarnings("ignore")
 
 
 def main():
-    FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251208/futr_joint_epoch_5.ckpt"
+    FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251208/futr_joint_epoch_18.ckpt"
 
     args = get_args()
 
@@ -288,7 +288,7 @@ def main():
               running_episode_rewards, episode_success_rate, episode_action_tokens_log_prob, 
               agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=joint_model)
         if joint_model is not None and (j % 1 == 0):
-            save_path = os.path.join(FUTR_MODEL_PATH, f"futr_joint_epoch_{j}.ckpt")
+            save_path = os.path.join(FUTR_MODEL_PATH.replace('futr_joint_epoch_18.ckpt', ''), f"futr_joint_epoch_{j}.ckpt")
             joint_model.save_model(save_path)
 
 if __name__ == "__main__":
