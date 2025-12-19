@@ -41,8 +41,8 @@ weights = [
         ]
     },
     {
-        "dest": "openai/clip-vit-large-patch14-336",
-        "src": "clip-vit-large-patch14-336/ce19dc912ca5cd21c8a653c79e251e808ccabcd1",
+        "dest": "openai/clip-vit-large-patch14",
+        "src": "clip-vit-large-patch14/ce19dc912ca5cd21c8a653c79e251e808ccabcd1",
         "files": [
             "config.json",
             "preprocessor_config.json",
