@@ -55,6 +55,8 @@ def llava_evaluate(value_model, input_ids, output_ids, image_tensor, temperature
 
     input_token_len = inputs_embeds.shape[1] - output_ids.shape[1]
     hidden_states = outputs.hidden_states[-1][:, input_token_len-1]
+    target_dtype = value_model.value_head[0].weight.dtype  # (Sequential이면 [0]이 Linear일 가능성 큼)
+    hidden_states = hidden_states.to(target_dtype)
     values = value_model.value_head(hidden_states)
     scores = scores * (1/temperature)
     scores = scores.to(torch.float32)

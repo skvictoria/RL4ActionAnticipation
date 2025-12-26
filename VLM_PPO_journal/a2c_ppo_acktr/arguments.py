@@ -197,7 +197,7 @@ def get_args():
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
-    parser.add_argument("--cache_dir", type=str, default=None)
+    parser.add_argument("--cache_dir", type=str, default='/home/hice1/skim3513/scratch/RL4ActionAnticipation/hf_cache')
     parser.add_argument("--use-lora", default=False, action='store_true')
     parser.add_argument("--train-vision", type=str, default='all')
     parser.add_argument("--thought-prob-coef", type=float, default=1.0, help='any number between 0-1, multiplier for the log thought probability')
