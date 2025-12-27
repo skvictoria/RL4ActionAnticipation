@@ -91,24 +91,26 @@ class FUTR(nn.Module):
         pos = self.pos_embedding[:, :S,].repeat(B, 1, 1)
         src = rearrange(src, 'b t c -> t b c')
 
-        src_l3, _ = self.l3_attention(src, src, src) 
-        src_l3 = rearrange(src_l3, 't b c -> b t c')
-        l3_logits = pos_embed_l3.to(self.device) + src_l3
+        # src_l3, _ = self.l3_attention(src, src, src) 
+        # src_l3 = rearrange(src_l3, 't b c -> b t c')
+        # l3_logits = pos_embed_l3.to(self.device) + src_l3
 
-        # Base Action Query from Visual Features
-        action_query = l3_logits
-        action_query = F.adaptive_avg_pool1d(action_query.permute(0, 2, 1), self.n_query).permute(0, 2, 1) # [B, n_query, hidden]
+        # # Base Action Query from Visual Features
+        # action_query = l3_logits
+        # action_query = F.adaptive_avg_pool1d(action_query.permute(0, 2, 1), self.n_query).permute(0, 2, 1) # [B, n_query, hidden]
         
         # Inject VLM Context (Fine-grained Label) if provided
         if context is not None:
             # context: [B, 512] -> [B, hidden]
             ctx_emb = self.context_projector(context)
+            print("context shape: ", ctx_emb.shape)
             # Add to action_query (broadcast over n_query)
-            action_query = action_query + ctx_emb.unsqueeze(1)
+            action_query = ctx_emb.unsqueeze(1)
             action_query = rearrange(action_query, 'b t c -> t b c')
             tgt = torch.zeros_like(action_query)
         else:
-            tgt = torch.zeros_like(action_query)
+            tgt = rearrange(src, 't b c -> b t c')
+            tgt = torch.zeros_like(tgt)
             action_query = None
         
         pos = rearrange(pos, 'b t c -> t b c')
@@ -137,9 +139,6 @@ class FUTR(nn.Module):
         if self.args.seg :
             tgt_seg = self.fc_seg(src)
             output['seg'] = tgt_seg
-
-        l3_logits = self.fc_l3(l3_logits)
-        output['l3'] = l3_logits
 
         return output
 

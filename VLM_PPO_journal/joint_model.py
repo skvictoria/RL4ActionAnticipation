@@ -38,7 +38,7 @@ class JointFUTR:
             input_type='i3d_transcript',
             seg=True,
             anticipate=True,
-            max_pos_len=512, # Reduced max len for stability (was 2000)
+            max_pos_len=2000, # Reduced max len for stability (was 2000)
             n_query=8, 
             n_head=8,
             n_encoder_layer=6,
@@ -98,57 +98,50 @@ class JointFUTR:
     def _prepare_batch(self, infos, training=False):
         batch_inputs, batch_targets, valid_indices = [], [], []
         batch_act_targets, batch_dur_targets = [], []
+        batch_lengths = []  # [추가] 실제 시퀀스 길이를 저장하기 위한 리스트
 
         for i, info in enumerate(infos):
             seq_id = info.get('sequence_id')
             if not seq_id: continue
             
-            # 1. 전체 피처 로드하여 총 길이 확인
             feat_file = os.path.join(self.features_path, f"{seq_id}.npy")
             if not os.path.exists(feat_file): continue
             feats = np.load(feat_file)
             total_len = len(feats)
 
-            # 2. [수정] obs_perc 결정 (BaseDataset 로직 반영)
             if training:
-                # 학습 시 20%, 30%, 50% 중 하나를 무작위 선택하여 샘플링
                 obs_perc = np.random.choice([0.2, 0.3, 0.5])
                 observed_len = int(obs_perc * total_len)
             else:
-                # 추론 시에는 RL 에이전트의 현재 진행 프레임 사용
                 observed_len = info.get('frame_index', 0) + 1
             
             observed_len = max(1, min(observed_len, total_len))
             
             # 입력 피처 슬라이싱
             feats_seq = feats[:observed_len][::self.sample_rate]
-            if len(feats_seq) > self.args.max_pos_len:
-                feats_seq = feats_seq[-self.args.max_pos_len:]
+            
+            # [수정] 512(max_pos_len)로 강제 슬라이싱/제한하는 로직을 제거합니다.
+            # 이제 입력이 10프레임이면 10프레임 그대로 유지됩니다.
+            # if len(feats_seq) > self.args.max_pos_len:
+            #     feats_seq = feats_seq[-self.args.max_pos_len:]
 
-            # 3. [수정] Ground Truth 로드 및 타겟 생성
             gt_file = os.path.join(self.gt_path, f"{seq_id}.txt")
             if not os.path.exists(gt_file): continue
             
             with open(gt_file, 'r') as f:
-                # 'frame_index, action_label, ...' 형식 가정
                 lines = [line.strip().split(',') for line in f.readlines() if ',' in line]
             all_labels = [l[1] for l in lines]
             
-            # 입력 구간(Past)과 예측 구간(Future) 분리
             past_labels = all_labels[:observed_len][::self.sample_rate]
-            # 미래 구간은 BaseDataset처럼 전체의 50% 정도를 타겟으로 삼음
             future_labels = all_labels[observed_len : observed_len + int(0.5 * total_len)][::self.sample_rate]
 
-            # Segmentation 타겟 (Past)
             target_indices = [self.actions_dict.get(self._norm(lbl), self.pad_idx) for lbl in past_labels]
             full_target = torch.full((len(feats_seq),), self.pad_idx, dtype=torch.long)
             filled_len = min(len(feats_seq), len(target_indices))
             if filled_len > 0:
                 full_target[-filled_len:] = torch.tensor(target_indices[-filled_len:]).long()
 
-            # Action/Duration 타겟 (Future) - seq2transcript 로직 적용
             trans_act, trans_dur = self._seq2transcript(future_labels)
-            
             act_target = torch.full((self.args.n_query,), self.pad_idx, dtype=torch.long)
             dur_target = torch.full((self.args.n_query,), 0.0, dtype=torch.float)
             
@@ -161,65 +154,55 @@ class JointFUTR:
             batch_targets.append(full_target)
             batch_act_targets.append(act_target)
             batch_dur_targets.append(dur_target)
+            batch_lengths.append(len(feats_seq)) # [추가] 실제 길이 저장
             valid_indices.append(i)
 
-        if not batch_inputs: return None, None, None, None, []
+        if not batch_inputs: return None, None, None, None, [], [] # [수정] 반환값 추가
 
+        # pad_sequence는 배치 내 '최대 길이'에 맞게 패딩하지만, 512로 강제하지 않습니다.
         padded_inputs = pad_sequence(batch_inputs, batch_first=True).to(self.device)
         padded_targets = pad_sequence(batch_targets, batch_first=True, padding_value=self.pad_idx).to(self.device)
         padded_act = torch.stack(batch_act_targets).to(self.device)
         padded_dur = torch.stack(batch_dur_targets).to(self.device)
             
-        return padded_inputs, padded_targets, padded_act, padded_dur, valid_indices
+        return padded_inputs, padded_targets, padded_act, padded_dur, valid_indices, batch_lengths # [수정]
 
     def _norm(self, lbl):
         return lbl.strip().replace(" ", "").lower()
 
     def predict_coarse(self, infos):
-        """
-        FUTR 모델의 Segmentation 출력을 사용하여 과거 액션 히스토리를 예측합니다.
-        VLM의 프롬프트 구성을 위한 Coarse Label을 생성하는 데 사용됩니다.
-        """
         self.model.eval()
+        # [수정] 6번째 인자인 lengths를 받아옵니다.
+        inputs, targets_seg, targets_act, targets_dur, valid_indices, lengths = self._prepare_batch(infos, training=False)
         
-        # 1. [수정] _prepare_batch에서 5개의 인자를 받음
-        inputs, targets_seg, targets_act, targets_dur, valid_indices = self._prepare_batch(infos, training=False)
-        
-        # 데이터가 없는 경우 빈 히스토리 리스트 반환
         if inputs is None: 
             return [[] for _ in range(len(infos))]
 
         with torch.no_grad():
-            # 2. 모델 추론 (test 모드에서는 targets_seg 정보를 사용하지 않거나 None으로 전달 가능)
-            # FUTR 모델의 인터페이스에 따라 inputs만 넣거나 (inputs, None) 형태로 전달
             outputs = self.model(inputs, query=None, context=None, mode='test')
         
-        # 3. Segmentation 결과 추출 [B, S, n_class] -> 인덱스 변환 [B, S]
         seg_logits = outputs['seg']
         seg_preds = seg_logits.max(-1)[1].cpu().numpy()
         
-        # 결과를 저장할 리스트 초기화 (참조 무결성을 위해 리스트 컴프리헨션 사용)
         result_histories = [[] for _ in range(len(infos))]
         
         batch_idx = 0
         for i in range(len(infos)):
             if i in valid_indices:
-                # 해당 배치의 예측 인덱스 시퀀스
                 p_seq = seg_preds[batch_idx]
                 
-                # 4. [수정] inverse_dict를 사용하여 인덱스를 문자열로 변환
-                # 이전에 actions_dict에서 'none'을 제외했으므로, 유효한 클래스만 결과에 포함됨
+                # [수정] 모델의 출력이 배치 패딩 때문에 길어졌더라도, 
+                # lengths 정보를 사용하여 실제 입력 길이만큼만 자릅니다.
+                actual_len = lengths[batch_idx]
+                p_seq = p_seq[:actual_len] 
+                
                 hist_str = [
                     self.inverse_dict[p] for p in p_seq 
                     if p in self.inverse_dict
                 ]
-                
-                # 중복되는 연속 액션을 하나로 합치고 싶다면 여기서 추가 처리가 가능합니다.
-                # 현재는 프레임 단위의 모든 예측 결과를 리스트로 반환합니다.
                 result_histories[i] = hist_str
                 batch_idx += 1
             else:
-                # 유효한 피처가 없는 경우 기존 info에 있는 히스토리 유지
                 raw_hist = infos[i].get('action_history', [])
                 result_histories[i] = [h for h in raw_hist if h and h.lower() != "none"]
                 
@@ -228,7 +211,7 @@ class JointFUTR:
     def train_step(self, infos, fg_embedding):
         self.model.train()
         #inputs, targets, valid_indices = self._prepare_batch(infos, training=True)
-        inputs, targets_seg, targets_act, targets_dur, valid_indices = self._prepare_batch(infos, training=True)
+        inputs, targets_seg, targets_act, targets_dur, valid_indices, lengths = self._prepare_batch(infos, training=True)
         
         if inputs is None:
             return 0.0
