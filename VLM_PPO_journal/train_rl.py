@@ -59,8 +59,7 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             # Use 'predict_coarse' (Correct method name)
             pred_hist_list = joint_model.predict_coarse(infos)
             print("//////////")
-            print(pred_hist_list)
-            print(len(pred_hist_list[0]), len(pred_hist_list))
+            print(len(pred_hist_list[0]), len(pred_hist_list)) # (512, 1)
             print("//////////")
             predicted_history = pred_hist_list[0] if pred_hist_list else []
 

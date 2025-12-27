@@ -167,9 +167,10 @@ def main():
     start_epoch = 0
     if utkinect_enabled:
         # 경로가 존재하는지 확인 후 로드
-        if not os.path.exists(FUTR_MODEL_PATH):
+        if 1:#not os.path.exists(FUTR_MODEL_PATH):
             print(f"Warning: FUTR_MODEL_PATH {FUTR_MODEL_PATH} does not exist. Using random initialization.")
-            FUTR_MODEL_PATH = None
+            FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226"
+
         else:
             # [NEW] 파일명에서 Epoch 번호 추출 (예: ...epoch_5.ckpt -> 5)
             match = re.search(r'epoch_(\d+)', os.path.basename(FUTR_MODEL_PATH))

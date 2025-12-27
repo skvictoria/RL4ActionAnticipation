@@ -121,6 +121,8 @@ class FUTR(nn.Module):
         if tgt is None:
             tgt_seg = self.fc_seg(src)
             output['seg'] = tgt_seg
+            output['action'] = None
+            output['duration'] = None
             return output
 
         tgt = rearrange(tgt, 't b c -> b t c')
