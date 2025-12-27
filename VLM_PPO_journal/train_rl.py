@@ -58,6 +58,10 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         if joint_model is not None and 'utkinect' in args.env_name.lower():
             # Use 'predict_coarse' (Correct method name)
             pred_hist_list = joint_model.predict_coarse(infos)
+            print("//////////")
+            print(pred_hist_list)
+            print(len(pred_hist_list[0]), len(pred_hist_list))
+            print("//////////")
             predicted_history = pred_hist_list[0] if pred_hist_list else []
 
         # --- Generate Prompt with FUTR's Coarse Prediction ---
@@ -86,7 +90,7 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             text_outputs, prev_infos, args.env_name, clip_model, reward.device)
         reward = semantic_reward.to(reward.device)
         
-        if step % 50 == 0 or step == args.num_steps - 1:
+        if step % 10 == 0 or step == args.num_steps - 1:
             print(f"[collect] update {j+1}/{num_updates}, step {step+1}/{args.num_steps}")
 
         # --- [Step 3] Joint Training: FUTR Predicts Future ---
@@ -101,12 +105,13 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                     clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
                 except:
                     clean_txt = txt
-                # print("-------------")
-                # print("clean text: ", clean_txt)
-                # print("-------------")
+                
                 tokens = _clip_safe_tokenize(clean_txt, reward.device)
                 with torch.no_grad():
                     emb = clip_model.encode_text(tokens) 
+                    print("-------------")
+                    print(emb.shape)
+                    print("-------------")
                     fg_embeds.append(emb.squeeze(0))
             
             if fg_embeds:

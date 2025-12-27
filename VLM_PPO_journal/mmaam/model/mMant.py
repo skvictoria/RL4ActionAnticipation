@@ -98,26 +98,33 @@ class FUTR(nn.Module):
         # Base Action Query from Visual Features
         action_query = l3_logits
         action_query = F.adaptive_avg_pool1d(action_query.permute(0, 2, 1), self.n_query).permute(0, 2, 1) # [B, n_query, hidden]
-
+        
         # Inject VLM Context (Fine-grained Label) if provided
         if context is not None:
             # context: [B, 512] -> [B, hidden]
             ctx_emb = self.context_projector(context)
             # Add to action_query (broadcast over n_query)
             action_query = action_query + ctx_emb.unsqueeze(1)
-
+            action_query = rearrange(action_query, 'b t c -> t b c')
+            tgt = torch.zeros_like(action_query)
+        else:
+            tgt = torch.zeros_like(action_query)
+            action_query = None
+        
         pos = rearrange(pos, 'b t c -> t b c')
-        action_query = rearrange(action_query, 'b t c -> t b c') 
-        tgt = torch.zeros_like(action_query)
-
+        
         src, tgt = self.transformer(src=src, tgt=tgt, mask=src_key_padding_mask, tgt_mask=tgt_mask, 
                                     tgt_key_padding_mask=None, query_embed=action_query, 
                                     pos_embed=pos, tgt_pos_embed=None, epoch=epoch, idx=idx)
+        output = dict()
+        src = rearrange(src, 't b c -> b t c')
+        if tgt is None:
+            tgt_seg = self.fc_seg(src)
+            output['seg'] = tgt_seg
+            return output
 
         tgt = rearrange(tgt, 't b c -> b t c')
-        src = rearrange(src, 't b c -> b t c')
         
-        output = dict()
         if self.args.anticipate :
             output_class = self.fc(tgt) 
             duration = self.fc_len(tgt)

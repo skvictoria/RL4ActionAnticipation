@@ -127,47 +127,17 @@ def validate(model, val_loader, criterion, pad_idx, device):
             trans_future_target = trans_future_target.to(device)
             trans_dur_future_mask = (trans_dur_future != pad_idx).long().to(device)
 
-            # query_size = query_label.shape[1]
-            # for batch in range(query_label.shape[0]):
-            #     prev_label = query_label[batch][0]
-            #     zero_or_one = 0
-            #     for idx in range(query_size):
-            #         if prev_label == query_label[batch][idx]:
-            #             prev_label = query_label[batch][idx].detach().clone()
-            #             query_label[batch][idx] = zero_or_one
-            #         else:
-            #             if zero_or_one == 0:
-            #                 zero_or_one = 1
-            #             else:
-            #                 zero_or_one = 0
-            #             prev_label = query_label[batch][idx].detach().clone()
-            #             query_label[batch][idx] = zero_or_one
-
             outputs = model((features, past_label), query_label)
             losses = 0
 
             output_l3 = outputs['l3']
-            #print(query_label)
-            #print(output_l3.argmax(1))
             B, T, C = output_l3.size()
             output_l3 = output_l3.view(-1, C).to(device)
             query_label = query_label.view(-1)
-            #target_past_label = past_label.view(-1)
-            #print(output_l3, query_label)
             loss_l3, n_l3_correct, n_l3_total, _ = cal_performance_focal(output_l3, query_label, 48, 48, reference=None, target_ref=None)
             losses += loss_l3
             total_l3 += n_l3_total
             total_l3_correct += n_l3_correct
-
-            ######################## Soft label loss #####################################################
-            #output_supcon = outputs['supcon']
-            #output_supcon = output_supcon.view(-1, output_supcon.size(-1)).to(device)
-            #output_supcon = output_supcon.unsqueeze(1)
-            #loss_supcon = finegrained_criterion(output_supcon, query_label)
-            #losses += loss_supcon
-
-            ##############################################################################################
-            
             output_seg = outputs['seg']
             loss_seg, n_seg_correct, n_seg_total, _ = cal_performance(output_seg.view(-1, output_seg.size(-1)),
                                                                     past_label.view(-1), pad_idx, exclude_class_idx=None, reference=None, target_ref=None)
@@ -178,8 +148,6 @@ def validate(model, val_loader, criterion, pad_idx, device):
             output = outputs['action']
             loss_class, n_class_correct, n_class_total, _ = cal_performance(output.view(-1, output.size(-1)),
                                                                             trans_future_target.view(-1), pad_idx, exclude_class_idx=None, reference=None, target_ref=trans_future_target[:,0])
-            # loss_class, n_class_correct, n_class_total, _ = cal_performance(output.view(-1, output.size(-1)),
-            #                                                                 trans_future_target.view(-1), pad_idx, exclude_class_idx=None, reference=get_last_non_padding_labels(past_label, pad_idx), target_ref=trans_future_target[:,0])
             losses += loss_class
             val_class_correct += n_class_correct
             val_class_total += n_class_total
@@ -190,10 +158,6 @@ def validate(model, val_loader, criterion, pad_idx, device):
             )
             val_weighted_accuracy_total += val_weighted_acc
 
-            # output_dur = outputs['duration']
-            # output_dur = normalize_duration(output_dur, trans_dur_future_mask)
-            # loss_dur = torch.sum(criterion(output_dur, trans_dur_future)) / torch.sum(trans_dur_future_mask)
-            # losses += loss_dur
 
             val_loss += losses.item()
 
@@ -246,46 +210,9 @@ def train(args, model, train_loader, optimizer, scheduler, criterion, model_save
                 inputs = (gt_features, past_label)
             #print("----------------------------------------")
             if len(inputs[0]) < 8:
-                continue
-                # print("REPEAT-----------------")
-                # repeat_count = 8 - len(inputs[0])
-
-                # # Repeat the last element and concatenate to inputs[0]
-                # last_element_0 = inputs[0][-1].unsqueeze(0)  # Get the last element, adding batch dimension
-                # repeated_elements_0 = last_element_0.repeat(repeat_count, *[1 for _ in range(inputs[0].dim()-1)])  # Repeat it
-                # new_input_0 = torch.cat([inputs[0], repeated_elements_0], dim=0)  # Concatenate along the batch dimension
-
-                # # Repeat the last element and concatenate to inputs[1]
-                # last_element_1 = inputs[1][-1].unsqueeze(0)  # Get the last element, adding batch dimension
-                # repeated_elements_1 = last_element_1.repeat(repeat_count, *[1 for _ in range(inputs[1].dim()-1)])  # Repeat it
-                # new_input_1 = torch.cat([inputs[1], repeated_elements_1], dim=0)  # Concatenate along the batch dimension
-
-                # # Create a new tuple with modified inputs
-                # inputs = (new_input_0, new_input_1)
-
-                # last_element_q = query_label[-1].unsqueeze(0)
-                # repeated_elements_q = last_element_q.repeat(repeat_count, *[1 for _ in range(query_label.dim()-1)])
-                # query_label = torch.cat([query_label, repeated_elements_q], dim=0)
-            #print(inputs[0].shape, inputs[1].shape, query_label.shape)
+                continue            
             
-            # query_size = query_label.shape[1]
-            # for batch in range(B):
-            #     prev_label = query_label[batch][0]
-            #     zero_or_one = 0
-            #     for idx in range(query_size):
-            #         if prev_label == query_label[batch][idx]:
-            #             prev_label = query_label[batch][idx].detach().clone()
-            #             query_label[batch][idx] = zero_or_one
-            #         else:
-            #             if zero_or_one == 0:
-            #                 zero_or_one = 1
-            #             else:
-            #                 zero_or_one = 0
-            #             prev_label = query_label[batch][idx].detach().clone()
-            #             query_label[batch][idx] = zero_or_one
-            
-            
-            outputs = model(inputs, query_label)#, human_prompt=generate_prompt(past_label, past_label.size(1)))#, image_path=image_path) # query: (8, 65)
+            outputs = model(inputs, query_label)
 
             losses = 0
             target_past_label = past_label.view(-1) # (8, 34 )->
@@ -298,26 +225,13 @@ def train(args, model, train_loader, optimizer, scheduler, criterion, model_save
             B, T, C = output_l3.size()
             
             loss_supcon = temporal_cluster_loss(output_l3, get_cluster_intervals(query_label))
-            #loss_supcon = temporal_contrastive_loss(output_l3, get_cluster_intervals(query_label))
             output_l3 = output_l3.view(-1, C).to(device) #######
-            query_label = query_label.view(-1)##############
-            # #target_past_label = past_label.view(-1)
+            query_label = query_label.view(-1)
             
             loss_l3, n_l3_correct, n_l3_total, l3_correct = cal_performance_focal(output_l3, query_label, 47, 48, reference=None, target_ref=None)
-            #loss_l3 = loss_l3 if epoch <= 10 else torch.tensor(0.0, device=device)
             
             total_l3 += n_l3_total
             total_l3_correct += n_l3_correct
-            
-            ##############################################################################################
-
-            ######################## Soft label loss #####################################################
-            # output_supcon = outputs['supcon']
-            # output_supcon = output_supcon.view(-1, output_supcon.size(-1)).to(device)
-            # output_supcon = output_supcon.unsqueeze(1)
-            # loss_supcon_2 = finegrained_criterion(output_supcon, query_label)
-            # loss_supcon_2 = loss_supcon_2 if epoch > 10 else torch.tensor(0.0, device=device)
-            ##############################################################################################
 
             if args.seg :
                 output_seg = outputs['seg']
@@ -358,30 +272,11 @@ def train(args, model, train_loader, optimizer, scheduler, criterion, model_save
 
             ###################### L3 LOSS ###################################################################3
             warmup_factor = get_warmup_factor(epoch, start_epoch=0, peak_epoch=30, end_epoch=60)
-            #warmup_factor_2 = min(1.0, (epoch) / 30.0)
             losses = (1 - 1/how_much_wrong.mean()) * ((1-warmup_factor) * loss_l3 + (warmup_factor) * loss_supcon) + (1/how_much_wrong.mean()) * (loss + loss_dur + loss_seg)
             
-            
-
-            # Weighted loss combination
-            #losses += loss_l3 #* (1.0 - warmup_factor) + loss_supcon * warmup_factor
-            #losses += loss_supcon_2 * warmup_factor_2
-
-            ################### CHAIN OF THOUGHT ############################################
-            # chain_of_thought_weight = torch.where(l3_correct, torch.tensor(2.0, device=device), torch.tensor(0.01, device=device))
-            # print("get right:", chain_of_thought_weight.mean())
-            # print("oppose: ", 1/chain_of_thought_weight.mean())
-            # losses *= 1/chain_of_thought_weight.mean()
-            #################################################################################
-
-            epoch_loss_l3 += loss_l3.item() #* (1.0 - warmup_factor)
-            #epoch_loss_l3 += loss_supcon.item() * warmup_factor
-            
-            #losses *= bonus_weight.mean()
-            #######################################################################################################
+            epoch_loss_l3 += loss_l3.item()
             epoch_loss += losses.item()
             losses.backward()
-            #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
 
@@ -423,7 +318,5 @@ def train(args, model, train_loader, optimizer, scheduler, criterion, model_save
                 os.remove(best_save_file)
             torch.save(model.state_dict(), best_save_file)
             print(f"Best model saved with validation loss: {best_val_loss:.3f}")
-        # if not os.path.exists(save_path):
-        #     os.makedirs(save_path)
 
     return model

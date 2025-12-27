@@ -137,26 +137,27 @@ class JointFUTR:
     def predict_coarse(self, infos):
         self.model.eval()
         inputs, _, valid_indices = self._prepare_batch(infos, training=False)
-        
+        print("input shape: ", inputs.shape)
         if inputs is None: return []
 
         with torch.no_grad():
             outputs = self.model(inputs, query=None, context=None, mode='test')
-            
+        
         seg_preds = outputs['seg'].max(-1)[1].cpu().numpy()
+        print(outputs['seg'].shape, seg_preds.shape)
         result_histories = [[]] * len(infos)
         
         batch_idx = 0
         for i in range(len(infos)):
             if i in valid_indices:
                 p_seq = seg_preds[batch_idx]
-                
+                print("p seq: ", p_seq)
                 # [DEBUG] Print Raw Prediction Stats once in a while or if empty
                 #unique, counts = np.unique(p_seq, return_counts=True)
                 #print(f"DEBUG Preds Frame {i}: {dict(zip(unique, counts))}")
                 
                 hist_str = [self.inverse_dict.get(p, "UNDEFINED") for p in p_seq]
-                
+                print("hist str: ", hist_str)
                 # [FIX] Filter NONE but handle empty result
                 filtered_hist = [h for h in hist_str if h != "NONE"]
                 

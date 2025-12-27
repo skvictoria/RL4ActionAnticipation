@@ -110,17 +110,18 @@ class Transformer(nn.Module):
 
         #################### L3 query #################################
         if query_embed == None:
-            src_l3, _ = self.l3_attention(memory, src, src)
-            #src_l3 = src + memory
-            src_l3 = rearrange(src_l3, 't b c -> b t c')
+            return memory, None
+            # src_l3, _ = self.l3_attention(memory, src, src)
+            # #src_l3 = src + memory
+            # src_l3 = rearrange(src_l3, 't b c -> b t c')
             
-            _, S, _ = src_l3.size()
-            pos_embed_l3 = self.positional_embedding_l3.unsqueeze(0) # (1, 2000, 128)
-            labels_list = pos_embed_l3[:, :S,].to(self.device) + src_l3 # (1, 537, 128)
-            #labels_list = labels_list + rearrange(memory, 't b c -> b t c')
-            query_embed = F.adaptive_avg_pool1d(labels_list.permute(0, 2, 1), self.n_query).permute(0, 2, 1)
-            query_embed = rearrange(query_embed, 'b t c -> t b c')
-            tgt = torch.zeros_like(query_embed)
+            # _, S, _ = src_l3.size()
+            # pos_embed_l3 = self.positional_embedding_l3.unsqueeze(0) # (1, 2000, 128)
+            # labels_list = pos_embed_l3[:, :S,].to(self.device) + src_l3 # (1, 537, 128)
+            # #labels_list = labels_list + rearrange(memory, 't b c -> b t c')
+            # query_embed = F.adaptive_avg_pool1d(labels_list.permute(0, 2, 1), self.n_query).permute(0, 2, 1)
+            # query_embed = rearrange(query_embed, 'b t c -> t b c')
+            # tgt = torch.zeros_like(query_embed)
         ###############################################################
 
         hs = self.decoder(tgt, memory, tgt_mask=tgt_mask, memory_key_padding_mask=mask, tgt_key_padding_mask=tgt_key_padding_mask,
