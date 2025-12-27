@@ -51,20 +51,25 @@ def warmup_futr(args, envs, joint_model, num_steps=500):
 
 def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, running_episode_rewards, episode_success_rate, episode_action_tokens_log_prob, agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=None):
 
+    # 샘플링할 고정 프레임 수 (INSIGHT 논문 방식 적용)
+    num_sampled_frames = 16 
+
     for step in range(args.num_steps):
         
         # --- [Step 1] FUTR Predicts Coarse Labels (for Prompt) ---
         predicted_history = None
         if joint_model is not None and 'utkinect' in args.env_name.lower():
-            # Use 'predict_coarse' (Correct method name)
             pred_hist_list = joint_model.predict_coarse(infos)
-            print("//////////")
-            print(len(pred_hist_list[0]), len(pred_hist_list)) # (512, 1)
-            print("//////////")
+            # 배치의 첫 번째 환경 히스토리만 샘플로 출력/사용
             predicted_history = pred_hist_list[0] if pred_hist_list else []
 
-        # --- Generate Prompt with FUTR's Coarse Prediction ---
-        qs = get_prompt(args.env_name, args.action_only_prompt, infos, predicted_history=predicted_history)
+        # INSIGHT 방식: 최근 8개의 행동만 프롬프트에 포함하여 토큰 길이 최적화
+        max_history = 8 
+        limited_history = predicted_history[-max_history:] if predicted_history else []
+
+        qs = get_prompt(args.env_name, args.action_only_prompt, infos, 
+                        predicted_history=limited_history)
+        
         qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
@@ -78,7 +83,7 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             value, output_id, action, action_log_prob, action_tokens_log_prob, text_outputs = actor_critic.act(
                     rollouts.obs[step], INPUT_IDS = INPUT_IDS)
         
-        text_action = text_outputs[0] if text_outputs else ""
+        # 환경 단계 전의 정보를 복사 (학습용)
         prev_infos = copy.deepcopy(infos)
         
         # Environment Step
@@ -88,18 +93,19 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         semantic_reward = rl_utils.semantic_reward_from_text(
             text_outputs, prev_infos, args.env_name, clip_model, reward.device)
         reward = semantic_reward.to(reward.device)
-        
-        if step % 10 == 0 or step == args.num_steps - 1:
-            print(f"[collect] update {j+1}/{num_updates}, step {step+1}/{args.num_steps}")
 
-        # --- [Step 3] Joint Training: FUTR Predicts Future ---
-        futr_loss = 0.0
+        # --- [Step 3] Update Embedding Buffer & Joint Training ---
         if joint_model is not None:
-            # 1. Encode VLM output
-            fg_embeds = []
             clip_model = clip_model.to(reward.device).eval()
-            for txt in text_outputs:
-                # Basic cleaning
+            batch_fg_sequences = [] # 전 배치의 시퀀스 임베딩을 담을 리스트
+
+            for i in range(args.num_processes):
+                # 1. 버퍼 초기화 및 관리
+                if 'fg_buffer' not in prev_infos[i]:
+                    prev_infos[i]['fg_buffer'] = []
+                
+                # 2. 현재 VLM 출력 인코딩
+                txt = text_outputs[i] if i < len(text_outputs) else ""
                 try:
                     clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
                 except:
@@ -107,18 +113,40 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                 
                 tokens = _clip_safe_tokenize(clean_txt, reward.device)
                 with torch.no_grad():
-                    emb = clip_model.encode_text(tokens) 
-                    print("-------------")
-                    print(emb.shape)
-                    print("-------------")
-                    fg_embeds.append(emb.squeeze(0))
-            
-            if fg_embeds:
-                fg_tensor = torch.stack(fg_embeds) 
-                # 2. Train FUTR
-                futr_loss = joint_model.train_step(prev_infos, fg_tensor)
+                    # 현재 프레임의 정교한 텍스트 임베딩 생성
+                    current_emb = clip_model.encode_text(tokens).squeeze(0).detach().cpu()
+                
+                # 3. 버퍼에 현재 임베딩 추가
+                # (주의: envs.step 이후의 infos는 리셋될 수 있으므로 prev_infos의 버퍼를 업데이트하여 다음 루프로 전달되게 관리 필요)
+                # 실제 구현에서는 infos가 step마다 초기화되므로, 외부 리스트나 env wrapper에서 버퍼를 유지하는 것이 좋으나
+                # 여기서는 로직 흐름상 infos[i]에 저장합니다.
+                if 'fg_buffer' not in infos[i]:
+                    infos[i]['fg_buffer'] = prev_infos[i].get('fg_buffer', [])
+                infos[i]['fg_buffer'].append(current_emb)
 
-        # Store in Rollouts
+                # 4. 에피소드가 끝났으면 버퍼 비우기
+                if done[i]:
+                    infos[i]['fg_buffer'] = []
+
+                # 5. Joint 학습을 위한 시퀀스 샘플링 (INSIGHT 방식)
+                observed_len = len(infos[i]['fg_buffer'])
+                if observed_len > 0:
+                    # 0부터 현재까지를 num_sampled_frames 개수만큼 균등 추출
+                    sample_indices = np.linspace(0, observed_len - 1, num_sampled_frames, dtype=int)
+                    sampled_fg = torch.stack([infos[i]['fg_buffer'][idx] for idx in sample_indices])
+                    batch_fg_sequences.append(sampled_fg)
+                else:
+                    # 데이터가 없는 초기 단계용 더미
+                    batch_fg_sequences.append(torch.zeros(num_sampled_frames, 512))
+
+            # 6. 배치 단위로 묶어서 FUTR 학습 (Batch_Size, Sampled_Seq, 512)
+            fg_tensor_seq = torch.stack(batch_fg_sequences).to(reward.device)
+            futr_loss = joint_model.train_step(prev_infos, fg_tensor_seq)
+
+        # --- [Step 4] Rollout Storage & Logging ---
+        if step % 10 == 0 or step == args.num_steps - 1:
+            print(f"[collect] update {j+1}/{num_updates}, step {step+1}/{args.num_steps}")
+
         masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
         bad_masks = torch.FloatTensor([[0.0] if 'bad_transition' in info.keys() else [1.0] for info in infos])
         

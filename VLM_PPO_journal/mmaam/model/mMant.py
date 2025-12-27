@@ -101,12 +101,8 @@ class FUTR(nn.Module):
         
         # Inject VLM Context (Fine-grained Label) if provided
         if context is not None:
-            # context: [B, 512] -> [B, hidden]
             ctx_emb = self.context_projector(context)
-            print("context shape: ", ctx_emb.shape)
-            # Add to action_query (broadcast over n_query)
-            action_query = ctx_emb.unsqueeze(1)
-            action_query = rearrange(action_query, 'b t c -> t b c')
+            action_query = rearrange(ctx_emb, 'b t c -> t b c')
             tgt = torch.zeros_like(action_query)
         else:
             tgt = rearrange(src, 't b c -> b t c')

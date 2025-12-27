@@ -38,8 +38,8 @@ class JointFUTR:
             input_type='i3d_transcript',
             seg=True,
             anticipate=True,
-            max_pos_len=2000, # Reduced max len for stability (was 2000)
-            n_query=8, 
+            max_pos_len=2000,
+            n_query=16, 
             n_head=8,
             n_encoder_layer=6,
             n_decoder_layer=6
@@ -96,6 +96,7 @@ class JointFUTR:
         return transcript_action, transcript_dur
 
     def _prepare_batch(self, infos, training=False):
+        num_sampled_frames = 16  # 고정된 입력 프레임 수 (예: 16)
         batch_inputs, batch_targets, valid_indices = [], [], []
         batch_act_targets, batch_dur_targets = [], []
         batch_lengths = []  # [추가] 실제 시퀀스 길이를 저장하기 위한 리스트
@@ -116,6 +117,13 @@ class JointFUTR:
                 observed_len = info.get('frame_index', 0) + 1
             
             observed_len = max(1, min(observed_len, total_len))
+            if observed_len > num_sampled_frames:
+                # np.linspace를 사용하여 처음부터 현재까지를 균등하게 K개 선택
+                indices = np.linspace(0, observed_len - 1, num_sampled_frames, dtype=int)
+                feats_seq = feats[indices]
+            else:
+                # 프레임이 부족하면 그대로 사용 (이후 pad_sequence가 처리)
+                feats_seq = feats[:observed_len]
             
             # 입력 피처 슬라이싱
             feats_seq = feats[:observed_len][::self.sample_rate]
