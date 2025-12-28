@@ -15,6 +15,7 @@ from llava.mm_utils import tokenizer_image_token
 import accelerate
 from tqdm import tqdm
 import warnings
+import wandb
 warnings.filterwarnings("ignore")
 
 # [NEW] FUTR Warmup Function
@@ -150,6 +151,14 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         
         rollouts.insert(obs, output_id, action,
                         action_log_prob, value, reward, masks, bad_masks)
+        
+        if args.use_wandb:
+            # 전체 환경 스텝 수 계산 (x축용)
+            total_env_steps = j * args.num_steps * args.num_processes + step * args.num_processes
+            wandb.log({
+                "step/reward": reward.mean().item(),
+                "step/futr_loss": futr_loss if isinstance(futr_loss, float) else futr_loss.item()
+            }, step=total_env_steps)
 
     print(f"****** iteration number: {j} | FUTR Loss: {futr_loss:.4f} ******")
     
@@ -175,5 +184,25 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                                 args.gae_lambda, args.use_proper_time_limits)
     value_loss, action_loss, dist_entropy = agent.update(rollouts)
     lr_scheduler.step()
+
+    if args.use_wandb:
+        curr_step = (j + 1) * args.num_steps * args.num_processes
+        log_data = {
+            "train/value_loss": value_loss,
+            "train/action_loss": action_loss,
+            "train/dist_entropy": dist_entropy,
+            "train/learning_rate": lr_scheduler.get_last_lr()[0],
+            "train/iteration": j
+        }
+        
+        # 에피소드가 끝난 경우 보상 및 성공률 평균 기록
+        if len(episode_rewards) > 0:
+            log_data["eval/mean_episode_reward"] = np.mean(episode_rewards)
+        if len(episode_success_rate) > 0:
+            log_data["eval/success_rate"] = np.mean(episode_success_rate)
+        if len(episode_action_tokens_log_prob) > 0:
+            log_data["eval/action_log_prob"] = np.mean(episode_action_tokens_log_prob)
+            
+        wandb.log(log_data, step=curr_step)
     
     rollouts.after_update()

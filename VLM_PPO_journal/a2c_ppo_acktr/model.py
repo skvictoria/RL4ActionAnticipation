@@ -19,29 +19,41 @@ class VLMValue(nn.Module):
     def __init__(self, base):
         super(VLMValue, self).__init__()
         self.base = base
-        # hard-code value head
-        # self.value_head = nn.Linear(4096, 1, bias=True).to(base.device, dtype=torch.float16)
+        # 수정된 Value Head
         self.value_head = nn.Sequential(
-            nn.Linear(4096, 1024), # First layer
-            nn.ReLU(), # Non-linearity
-            nn.Linear(1024, 512), # Second layer
-            nn.ReLU(), # Non-linearity
-            nn.Linear(512, 1) # Output layer
-            ).to(base.device, dtype=torch.float16) # Move to specified device with dtype
+            nn.LayerNorm(4096),        # [추가] LLM의 Outlier 값을 잡아주어 NaN 방지
+            nn.Linear(4096, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1)
+        ).to(base.device, dtype=torch.float32) # [수정] float16 -> float32
 
-    def forward(self,  input_ids, image_tensor):
+    def forward(self, input_ids, image_tensor):
         if image_tensor.size(0) != 1:
             input_ids = input_ids.broadcast_to(image_tensor.size(0), input_ids.size(-1))
 
-        image_tensor = image_tensor.to(self.base.device, dtype = self.base.dtype)
-        _, _, _, _, inputs_embeds, _ = self.base.prepare_inputs_labels_for_multimodal(input_ids.to(self.base.device), None, None, None, None, image_tensor)
-        inputs_embeds = inputs_embeds.to(self.base.device, dtype = self.base.dtype)
+        image_tensor = image_tensor.to(self.base.device, dtype=self.base.dtype)
+        _, _, _, _, inputs_embeds, _ = self.base.prepare_inputs_labels_for_multimodal(
+            input_ids.to(self.base.device), None, None, None, None, image_tensor)
+        
+        inputs_embeds = inputs_embeds.to(self.base.device, dtype=self.base.dtype)
         assert inputs_embeds.shape[1] > 256
+        
         outputs = self.base(
-            inputs_embeds = inputs_embeds,
+            inputs_embeds=inputs_embeds,
             output_hidden_states=True)
-        hidden_states = outputs.hidden_states
-        values = self.value_head(hidden_states[-1][:, -1])
+        
+        # 마지막 레이어의 마지막 토큰 Hidden State를 가져옵니다.
+        # 이 값은 현재 BFloat16 상태입니다.
+        hidden_states = outputs.hidden_states[-1][:, -1]
+        
+        # [핵심 수정] BFloat16 데이터를 Float32로 캐스팅합니다.
+        # value_head(LayerNorm 등)가 Float32로 설정되어 있으므로 타입을 맞춰줘야 합니다.
+        with torch.cuda.amp.autocast(enabled=False):
+            hidden_states = hidden_states.float()      
+            values = self.value_head.float()(hidden_states)
+        
         return values
 
 
