@@ -51,8 +51,7 @@ def warmup_futr(args, envs, joint_model, num_steps=500):
 
 def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, running_episode_rewards, episode_success_rate, episode_action_tokens_log_prob, agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=None):
 
-    # 샘플링할 고정 프레임 수 (INSIGHT 논문 방식 적용)
-    num_sampled_frames = 16 
+    num_sampled_frames = 16 # INSIGHT 논문 방식: 고정된 시퀀스 길이
 
     for step in range(args.num_steps):
         
@@ -60,16 +59,13 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         predicted_history = None
         if joint_model is not None and 'utkinect' in args.env_name.lower():
             pred_hist_list = joint_model.predict_coarse(infos)
-            # 배치의 첫 번째 환경 히스토리만 샘플로 출력/사용
             predicted_history = pred_hist_list[0] if pred_hist_list else []
 
-        # INSIGHT 방식: 최근 8개의 행동만 프롬프트에 포함하여 토큰 길이 최적화
         max_history = 8 
         limited_history = predicted_history[-max_history:] if predicted_history else []
 
         qs = get_prompt(args.env_name, args.action_only_prompt, infos, 
                         predicted_history=limited_history)
-        
         qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
@@ -83,7 +79,6 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             value, output_id, action, action_log_prob, action_tokens_log_prob, text_outputs = actor_critic.act(
                     rollouts.obs[step], INPUT_IDS = INPUT_IDS)
         
-        # 환경 단계 전의 정보를 복사 (학습용)
         prev_infos = copy.deepcopy(infos)
         
         # Environment Step
@@ -95,52 +90,47 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         reward = semantic_reward.to(reward.device)
 
         # --- [Step 3] Update Embedding Buffer & Joint Training ---
+        futr_loss = 0.0
         if joint_model is not None:
+            # 1. VLM 출력 텍스트를 CLIP 임베딩으로 일괄 변환 (Batch Processing)
             clip_model = clip_model.to(reward.device).eval()
-            batch_fg_sequences = [] # 전 배치의 시퀀스 임베딩을 담을 리스트
-
-            for i in range(args.num_processes):
-                # 1. 버퍼 초기화 및 관리
-                if 'fg_buffer' not in prev_infos[i]:
-                    prev_infos[i]['fg_buffer'] = []
-                
-                # 2. 현재 VLM 출력 인코딩
-                txt = text_outputs[i] if i < len(text_outputs) else ""
+            all_tokens = []
+            for txt in text_outputs:
                 try:
                     clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
                 except:
                     clean_txt = txt
-                
-                tokens = _clip_safe_tokenize(clean_txt, reward.device)
-                with torch.no_grad():
-                    # 현재 프레임의 정교한 텍스트 임베딩 생성
-                    current_emb = clip_model.encode_text(tokens).squeeze(0).detach().cpu()
-                
-                # 3. 버퍼에 현재 임베딩 추가
-                # (주의: envs.step 이후의 infos는 리셋될 수 있으므로 prev_infos의 버퍼를 업데이트하여 다음 루프로 전달되게 관리 필요)
-                # 실제 구현에서는 infos가 step마다 초기화되므로, 외부 리스트나 env wrapper에서 버퍼를 유지하는 것이 좋으나
-                # 여기서는 로직 흐름상 infos[i]에 저장합니다.
-                if 'fg_buffer' not in infos[i]:
-                    infos[i]['fg_buffer'] = prev_infos[i].get('fg_buffer', [])
-                infos[i]['fg_buffer'].append(current_emb)
+                all_tokens.append(_clip_safe_tokenize(clean_txt, reward.device))
+            
+            all_tokens_tensor = torch.cat(all_tokens)
+            with torch.no_grad():
+                all_embs = clip_model.encode_text(all_tokens_tensor).detach().cpu() # [B, 512]
 
-                # 4. 에피소드가 끝났으면 버퍼 비우기
+            batch_fg_sequences = [] 
+            for i in range(args.num_processes):
+                # 2. 이전 버퍼 가져오기 (없으면 초기화)
+                if 'fg_buffer' not in prev_infos[i]:
+                    prev_infos[i]['fg_buffer'] = []
+                
+                # 3. 현재 프레임 임베딩 추가
+                current_emb = all_embs[i]
+                prev_infos[i]['fg_buffer'].append(current_emb)
+
+                # 4. Joint 학습을 위한 시퀀스 샘플링 (INSIGHT 방식)
+                observed_len = len(prev_infos[i]['fg_buffer'])
+                # np.linspace로 0부터 현재까지 num_sampled_frames만큼 균등 추출
+                sample_indices = np.linspace(0, observed_len - 1, num_sampled_frames, dtype=int)
+                sampled_fg = torch.stack([prev_infos[i]['fg_buffer'][idx] for idx in sample_indices])
+                batch_fg_sequences.append(sampled_fg)
+
+                # 5. 에피소드 종료 여부에 따른 버퍼 전송/초기화
                 if done[i]:
                     infos[i]['fg_buffer'] = []
-
-                # 5. Joint 학습을 위한 시퀀스 샘플링 (INSIGHT 방식)
-                observed_len = len(infos[i]['fg_buffer'])
-                if observed_len > 0:
-                    # 0부터 현재까지를 num_sampled_frames 개수만큼 균등 추출
-                    sample_indices = np.linspace(0, observed_len - 1, num_sampled_frames, dtype=int)
-                    sampled_fg = torch.stack([infos[i]['fg_buffer'][idx] for idx in sample_indices])
-                    batch_fg_sequences.append(sampled_fg)
                 else:
-                    # 데이터가 없는 초기 단계용 더미
-                    batch_fg_sequences.append(torch.zeros(num_sampled_frames, 512))
+                    infos[i]['fg_buffer'] = prev_infos[i]['fg_buffer']
 
-            # 6. 배치 단위로 묶어서 FUTR 학습 (Batch_Size, Sampled_Seq, 512)
-            fg_tensor_seq = torch.stack(batch_fg_sequences).to(reward.device)
+            # 6. 배치 단위로 FUTR 학습 진행
+            fg_tensor_seq = torch.stack(batch_fg_sequences).to(reward.device) # [Batch, 16, 512]
             futr_loss = joint_model.train_step(prev_infos, fg_tensor_seq)
 
         # --- [Step 4] Rollout Storage & Logging ---
@@ -154,10 +144,7 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         for i, d, r in zip(range(args.num_processes), done, reward):
             if d:
                 episode_rewards.append(running_episode_rewards[i].item())
-                if running_episode_rewards[i] > 0:
-                    episode_success_rate.append(1)
-                else:
-                    episode_success_rate.append(0)
+                episode_success_rate.append(1 if running_episode_rewards[i] > 0 else 0)
                 episode_action_tokens_log_prob.append(action_tokens_log_prob[i].item())
                 running_episode_rewards[i] = 0
         
@@ -169,7 +156,8 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
     with torch.no_grad():
         pred_hist_next = []
         if joint_model:
-            pred_hist_next = joint_model.predict_coarse(infos)[0] 
+            pred_hist_next_list = joint_model.predict_coarse(infos)
+            pred_hist_next = pred_hist_next_list[0] if pred_hist_next_list else []
             
         qs = get_prompt(args.env_name, args.action_only_prompt, infos, predicted_history=pred_hist_next)
         qs = DEFAULT_IMAGE_TOKEN + "\n" + qs

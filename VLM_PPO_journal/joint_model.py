@@ -96,10 +96,12 @@ class JointFUTR:
         return transcript_action, transcript_dur
 
     def _prepare_batch(self, infos, training=False):
-        num_sampled_frames = 16  # 고정된 입력 프레임 수 (예: 16)
         batch_inputs, batch_targets, valid_indices = [], [], []
         batch_act_targets, batch_dur_targets = [], []
-        batch_lengths = []  # [추가] 실제 시퀀스 길이를 저장하기 위한 리스트
+        batch_lengths = []
+        
+        # 샘플링할 프레임 수 (n_query와 일치시키는 것이 좋음)
+        num_sampled_frames = 16 
 
         for i, info in enumerate(infos):
             seq_id = info.get('sequence_id')
@@ -107,9 +109,13 @@ class JointFUTR:
             
             feat_file = os.path.join(self.features_path, f"{seq_id}.npy")
             if not os.path.exists(feat_file): continue
+            
             feats = np.load(feat_file)
+            if np.isnan(feats).any():
+                feats = np.nan_to_num(feats)
             total_len = len(feats)
 
+            # 관찰된 길이 결정
             if training:
                 obs_perc = np.random.choice([0.2, 0.3, 0.5])
                 observed_len = int(obs_perc * total_len)
@@ -117,22 +123,17 @@ class JointFUTR:
                 observed_len = info.get('frame_index', 0) + 1
             
             observed_len = max(1, min(observed_len, total_len))
-            if observed_len > num_sampled_frames:
-                # np.linspace를 사용하여 처음부터 현재까지를 균등하게 K개 선택
-                indices = np.linspace(0, observed_len - 1, num_sampled_frames, dtype=int)
-                feats_seq = feats[indices]
-            else:
-                # 프레임이 부족하면 그대로 사용 (이후 pad_sequence가 처리)
-                feats_seq = feats[:observed_len]
-            
-            # 입력 피처 슬라이싱
-            feats_seq = feats[:observed_len][::self.sample_rate]
-            
-            # [수정] 512(max_pos_len)로 강제 슬라이싱/제한하는 로직을 제거합니다.
-            # 이제 입력이 10프레임이면 10프레임 그대로 유지됩니다.
-            # if len(feats_seq) > self.args.max_pos_len:
-            #     feats_seq = feats_seq[-self.args.max_pos_len:]
 
+            # [1] 과거 시점 샘플링 인덱스 정의 (Uniform Sampling)
+            if observed_len > num_sampled_frames:
+                indices = np.linspace(0, observed_len - 1, num_sampled_frames, dtype=int)
+            else:
+                indices = np.arange(observed_len)
+
+            # 피처 샘플링
+            feats_seq = feats[indices]
+
+            # [2] 정답 레이블 로드
             gt_file = os.path.join(self.gt_path, f"{seq_id}.txt")
             if not os.path.exists(gt_file): continue
             
@@ -140,16 +141,19 @@ class JointFUTR:
                 lines = [line.strip().split(',') for line in f.readlines() if ',' in line]
             all_labels = [l[1] for l in lines]
             
-            past_labels = all_labels[:observed_len][::self.sample_rate]
-            future_labels = all_labels[observed_len : observed_len + int(0.5 * total_len)][::self.sample_rate]
+            # [3] Segmentation Target (과거 샘플링된 프레임의 레이블)
+            sampled_labels = [all_labels[idx] for idx in indices]
+            target_indices = [self.actions_dict.get(self._norm(lbl), self.pad_idx) for lbl in sampled_labels]
+            full_target = torch.tensor(target_indices).long()
 
-            target_indices = [self.actions_dict.get(self._norm(lbl), self.pad_idx) for lbl in past_labels]
-            full_target = torch.full((len(feats_seq),), self.pad_idx, dtype=torch.long)
-            filled_len = min(len(feats_seq), len(target_indices))
-            if filled_len > 0:
-                full_target[-filled_len:] = torch.tensor(target_indices[-filled_len:]).long()
-
+            # [4] Future Labels 정의 (observed_len 이후의 모든 레이블)
+            # 이 변수가 누락되어 NameError가 발생했던 것입니다.
+            future_labels = all_labels[observed_len : observed_len + int(0.5 * total_len)]
+            
+            # 미래 행동 시퀀스를 텍스트 형태에서 인덱스로 변환
             trans_act, trans_dur = self._seq2transcript(future_labels)
+            
+            # 미래 예측 타겟 텐서 생성 (n_query 길이에 맞춤)
             act_target = torch.full((self.args.n_query,), self.pad_idx, dtype=torch.long)
             dur_target = torch.full((self.args.n_query,), 0.0, dtype=torch.float)
             
@@ -158,22 +162,24 @@ class JointFUTR:
                 act_target[:q_len] = torch.tensor(trans_act[:q_len]).long()
                 dur_target[:q_len] = torch.tensor(trans_dur[:q_len]).float()
 
+            # 배치 리스트에 추가
             batch_inputs.append(torch.tensor(feats_seq).float())
             batch_targets.append(full_target)
             batch_act_targets.append(act_target)
             batch_dur_targets.append(dur_target)
-            batch_lengths.append(len(feats_seq)) # [추가] 실제 길이 저장
+            batch_lengths.append(len(feats_seq))
             valid_indices.append(i)
 
-        if not batch_inputs: return None, None, None, None, [], [] # [수정] 반환값 추가
+        if not batch_inputs: 
+            return None, None, None, None, [], []
 
-        # pad_sequence는 배치 내 '최대 길이'에 맞게 패딩하지만, 512로 강제하지 않습니다.
+        # 패딩 처리 (Batch 내 최대 길이에 맞춤, 이제 최대 길이는 항상 num_sampled_frames 이하)
         padded_inputs = pad_sequence(batch_inputs, batch_first=True).to(self.device)
         padded_targets = pad_sequence(batch_targets, batch_first=True, padding_value=self.pad_idx).to(self.device)
         padded_act = torch.stack(batch_act_targets).to(self.device)
         padded_dur = torch.stack(batch_dur_targets).to(self.device)
             
-        return padded_inputs, padded_targets, padded_act, padded_dur, valid_indices, batch_lengths # [수정]
+        return padded_inputs, padded_targets, padded_act, padded_dur, valid_indices, batch_lengths
 
     def _norm(self, lbl):
         return lbl.strip().replace(" ", "").lower()
@@ -221,7 +227,7 @@ class JointFUTR:
         #inputs, targets, valid_indices = self._prepare_batch(infos, training=True)
         inputs, targets_seg, targets_act, targets_dur, valid_indices, lengths = self._prepare_batch(infos, training=True)
         
-        if inputs is None:
+        if inputs is None or len(valid_indices) == 0:
             return 0.0
 
         valid_fg_embed = None
@@ -229,6 +235,7 @@ class JointFUTR:
             valid_fg_list = [fg_embedding[i] for i in valid_indices]
             if valid_fg_list:
                 valid_fg_embed = torch.stack(valid_fg_list).to(self.device)
+                valid_fg_embed = torch.nan_to_num(valid_fg_embed)
 
         self.optimizer.zero_grad()
         
@@ -236,6 +243,7 @@ class JointFUTR:
         
         # 1. [Segmentation Loss]
         loss_seg = self.criterion_cls(outputs['seg'].view(-1, self.n_class), targets_seg.view(-1))
+        
         
         # 2. Action Anticipation Loss
         if outputs['action'] is not None:
