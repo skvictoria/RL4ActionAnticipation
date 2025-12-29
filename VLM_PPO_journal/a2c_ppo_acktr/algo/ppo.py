@@ -54,7 +54,7 @@ class PPO():
                     value_preds_batch, return_batch, masks_batch, old_action_log_probs_batch, \
                             adv_targ = sample
                     # Reshape to do in a single forward pass for all steps
-                    values, action_log_probs = self.actor_critic.evaluate_actions(
+                    values, action_log_probs, dist_entropy = self.actor_critic.evaluate_actions(
                         obs_batch, output_ids_batch)
                     # values and action_log_probs on two different devices!! because they come from two llava
                     if torch.isnan(action_log_probs).any():
@@ -93,7 +93,11 @@ class PPO():
                     except:
                         print("value/action loss is nan")
                         exit(1)
-                    loss = value_loss * self.value_loss_coef+action_loss
+                    loss = value_loss * self.value_loss_coef+action_loss- dist_entropy * self.entropy_coef
+                    if not torch.isfinite(loss):
+                        print("Loss is non-finite, skipping backward.")
+                        self.optimizer.zero_grad()
+                        continue
                     self.accelerator.backward(loss)
                     if self.accelerator.sync_gradients:
 

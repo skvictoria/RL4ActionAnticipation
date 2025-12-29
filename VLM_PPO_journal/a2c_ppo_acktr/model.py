@@ -104,10 +104,10 @@ class VLMPolicy(nn.Module):
         image_tensor = self.process_obs(inputs)
         if INPUT_IDS is None:
             INPUT_IDS = self.INPUT_IDS
-        value, action_log_prob, _ = llava_evaluate(value_model = self.value_model,
+        value, action_log_prob, dist_entropy = llava_evaluate(value_model = self.value_model,
                                         input_ids = INPUT_IDS,
                                         output_ids = output_ids,
                                         image_tensor = image_tensor,
                                         temperature = self.args.temperature,
                                         thought_prob_coef = self.args.thought_prob_coef)
-        return value, action_log_prob
+        return value, action_log_prob, dist_entropy

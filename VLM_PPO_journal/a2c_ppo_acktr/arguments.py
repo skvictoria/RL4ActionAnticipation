@@ -8,7 +8,7 @@ def get_args():
     parser.add_argument(
         '--init-lr',
         type=float,
-        default=1e-6,
+        default=2e-7,
         help='initial learning rate (default: 1e-6)')
     parser.add_argument(
         '--end-lr',
@@ -63,7 +63,7 @@ def get_args():
     parser.add_argument(
         '--max-grad-norm',
         type=float,
-        default=0.01,
+        default=0.5,
         help='max norm of gradients (default: 0.01)')
     parser.add_argument(
         '--seed', type=int, default=1, help='random seed (default: 1)')
@@ -95,7 +95,7 @@ def get_args():
     parser.add_argument(
         '--mini-batch-size',
         type=int,
-        default=1,
+        default=4,
         help='size of mini-batches for each update (default: 1)')
     parser.add_argument(
         '--clip-param',

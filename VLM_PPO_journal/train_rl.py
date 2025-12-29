@@ -146,6 +146,7 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             if d:
                 episode_rewards.append(running_episode_rewards[i].item())
                 episode_success_rate.append(1 if running_episode_rewards[i] > 0 else 0)
+                episode_success_rate.append(1 if running_episode_rewards[i] / step_count > -0.2 else 0)
                 episode_action_tokens_log_prob.append(action_tokens_log_prob[i].item())
                 running_episode_rewards[i] = 0
         
@@ -206,3 +207,5 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         wandb.log(log_data, step=curr_step)
     
     rollouts.after_update()
+
+    
