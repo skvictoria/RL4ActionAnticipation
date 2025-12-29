@@ -59,6 +59,7 @@ class PPO():
                     # values and action_log_probs on two different devices!! because they come from two llava
                     if torch.isnan(action_log_probs).any():
                         continue
+                    adv_targ = adv_targ.to(action_log_probs.device).view(-1)
                     old_action_log_probs_batch = old_action_log_probs_batch.to(action_log_probs.device).view(-1)
                     adv_targ = adv_targ.to(action_log_probs.device)
                     value_preds_batch = value_preds_batch.to(values.device)
@@ -93,12 +94,14 @@ class PPO():
                     except:
                         print("value/action loss is nan")
                         exit(1)
+                    
                     loss = value_loss * self.value_loss_coef+action_loss- dist_entropy * self.entropy_coef
-                    if not torch.isfinite(loss):
+                    if not torch.isfinite(loss).all():
                         print("Loss is non-finite, skipping backward.")
                         self.optimizer.zero_grad()
                         continue
                     self.accelerator.backward(loss)
+                    dist_entropy_epoch += dist_entropy.item()
                     if self.accelerator.sync_gradients:
 
                         self.accelerator.clip_grad_norm_(

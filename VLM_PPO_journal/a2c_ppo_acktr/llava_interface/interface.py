@@ -79,8 +79,14 @@ def llava_evaluate(value_model, input_ids, output_ids, image_tensor, temperature
             sum_log_prob = torch.tensor([-2]).to(base.device)
             action_tokens_log_prob = torch.tensor([-1]).to(base.device)
             return values, sum_log_prob, action_tokens_log_prob
-    ## omitting the second token for calculating log prob, because its logprb is very very small
-    thought_log_prob = torch.sum(selected_log_probs[:,1:match_index-1], dim = 1)
-    action_tokens_log_prob = torch.sum(selected_log_probs[:,match_index-1:], dim = 1)
-    sum_log_prob = thought_prob_coef*thought_log_prob + action_tokens_log_prob
-    return values, sum_log_prob, action_tokens_log_prob
+    probs = torch.exp(log_probs[:, input_token_len:-1].to(torch.float32))
+    log_probs_slice = log_probs[:, input_token_len:-1].to(torch.float32)
+    entropy = -(probs * log_probs_slice).sum(dim=-1)
+    # 패딩을 제외한 실제 토큰의 평균 엔트로피 계산 (스칼라)
+    dist_entropy = (entropy * output_ids_mask).sum() / (output_ids_mask.sum() + 1e-8)
+
+    ## log_prob 계산 (기존 유지)
+    thought_log_prob = torch.sum(selected_log_probs[:, 1:match_index-1], dim=1)
+    action_tokens_log_prob = torch.sum(selected_log_probs[:, match_index-1:], dim=1)
+    sum_log_prob = thought_prob_coef * thought_log_prob + action_tokens_log_prob
+    return values, sum_log_prob, dist_entropy

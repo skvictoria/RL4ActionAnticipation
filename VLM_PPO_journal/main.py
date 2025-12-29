@@ -276,6 +276,7 @@ def main():
 
     print(qs)
     running_episode_rewards = torch.zeros(args.num_processes).flatten()
+    running_episode_steps = torch.zeros(args.num_processes).flatten()
 
     num_explore = int(args.explore_portion*num_updates)
     prev_infos = copy.deepcopy(infos)
@@ -285,7 +286,7 @@ def main():
     
     for j in tqdm(range(start_epoch, num_updates)):
         train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, 
-              running_episode_rewards, episode_success_rate, episode_action_tokens_log_prob, 
+              running_episode_rewards, running_episode_steps, episode_success_rate, episode_action_tokens_log_prob, 
               agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=joint_model)
         if joint_model is not None and (j % 1 == 0):
             #save_path = os.path.join(FUTR_MODEL_PATH.replace('futr_joint_epoch_26.ckpt', ''), f"futr_joint_epoch_{j}.ckpt")

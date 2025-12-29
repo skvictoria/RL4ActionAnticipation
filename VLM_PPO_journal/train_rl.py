@@ -50,7 +50,7 @@ def warmup_futr(args, envs, joint_model, num_steps=500):
     print("****** [Warmup] FUTR Warmup Complete. Model weights initialized. ******\n")
 
 
-def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, running_episode_rewards, episode_success_rate, episode_action_tokens_log_prob, agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=None):
+def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, running_episode_rewards, running_episode_steps, episode_success_rate, episode_action_tokens_log_prob, agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=None):
 
     num_sampled_frames = 16 # INSIGHT 논문 방식: 고정된 시퀀스 길이
 
@@ -81,6 +81,8 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                     rollouts.obs[step], INPUT_IDS = INPUT_IDS)
         
         prev_infos = copy.deepcopy(infos)
+        action_tokens_log_prob = action_tokens_log_prob.view(-1) 
+        action_log_prob = action_log_prob.view(-1)
         
         # Environment Step
         obs, reward, done, infos = envs.step(action)
@@ -142,13 +144,18 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         bad_masks = torch.FloatTensor([[0.0] if 'bad_transition' in info.keys() else [1.0] for info in infos])
         
         running_episode_rewards += reward.flatten()
+        running_episode_steps += 1
         for i, d, r in zip(range(args.num_processes), done, reward):
             if d:
+                avg_reward = running_episode_rewards[i] / running_episode_steps[i] # [수정]
                 episode_rewards.append(running_episode_rewards[i].item())
-                episode_success_rate.append(1 if running_episode_rewards[i] > 0 else 0)
-                episode_success_rate.append(1 if running_episode_rewards[i] / step_count > -0.2 else 0)
+                # 평균 리워드가 -0.2보다 크면(유사도가 높으면) 성공으로 간주
+                episode_success_rate.append(1 if avg_reward > -0.2 else 0)
                 episode_action_tokens_log_prob.append(action_tokens_log_prob[i].item())
+                
+                # 에피소드가 끝났으므로 변수 초기화
                 running_episode_rewards[i] = 0
+                running_episode_steps[i] = 0
         
         rollouts.insert(obs, output_id, action,
                         action_log_prob, value, reward, masks, bad_masks)
