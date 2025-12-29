@@ -1,5 +1,5 @@
 export OMP_NUM_THREADS=1
 export PYTHONNOUSERSITE=1
-TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes 1 --config_file scripts/config_zero2.yaml --main_process_port 29501 main.py --env-name utkinect/train --model-path liuhaotian/llava-v1.5-7b --utkinect-root /home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/datasets/utkinect --utkinect-split train --utkinect-history 6 --utkinect-frame-skip 1 --num-env-steps 15000 --num-steps 256 --grad-accum-steps 16 --max-new-tokens 256 --thought-prob-coef 0.5 --use-gae --seed 1 --temperature 0.2 --ppo-epoch 4 --mini-batch-size 4 --use-lora --train-vision all --use-wandb \
+TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes 1 --config_file scripts/config_zero2.yaml --main_process_port 29501 main.py --env-name utkinect/train --model-path liuhaotian/llava-v1.5-7b --utkinect-root /home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/datasets/utkinect --utkinect-split train --utkinect-history 6 --utkinect-frame-skip 1 --num-env-steps 15000 --num-steps 256 --grad-accum-steps 16 --max-new-tokens 256 --thought-prob-coef 0.1 --use-gae --seed 1 --temperature 0.2 --ppo-epoch 4 --mini-batch-size 4 --use-lora --train-vision none --use-wandb \
     --wandb-project "ActionAnticipation_VLM" \
     --wandb-run "experiment_1" \

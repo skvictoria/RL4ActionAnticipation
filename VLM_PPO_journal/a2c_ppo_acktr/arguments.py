@@ -63,7 +63,7 @@ def get_args():
     parser.add_argument(
         '--max-grad-norm',
         type=float,
-        default=0.5,
+        default=0.1,
         help='max norm of gradients (default: 0.01)')
     parser.add_argument(
         '--seed', type=int, default=1, help='random seed (default: 1)')
@@ -169,7 +169,7 @@ def get_args():
     parser.add_argument(
         '--use-linear-lr-decay',
         action='store_true',
-        default=False,
+        default=True,
         help='use a linear schedule on the learning rate')
     parser.add_argument(
         '--eval-num-per-episode',
@@ -200,7 +200,7 @@ def get_args():
     parser.add_argument("--cache_dir", type=str, default='/home/hice1/skim3513/scratch/RL4ActionAnticipation/hf_cache')
     parser.add_argument("--use-lora", default=False, action='store_true')
     parser.add_argument("--train-vision", type=str, default='all')
-    parser.add_argument("--thought-prob-coef", type=float, default=1.0, help='any number between 0-1, multiplier for the log thought probability')
+    parser.add_argument("--thought-prob-coef", type=float, default=0.1, help='any number between 0-1, multiplier for the log thought probability')
     parser.add_argument("--action_only_prompt", default=False, action='store_true')
     # Argments for supporting alf config file
     parser.add_argument("--alf_config", type=str, default=None)
