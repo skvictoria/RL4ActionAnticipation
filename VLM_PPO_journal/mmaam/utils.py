@@ -323,8 +323,10 @@ def temporal_cluster_loss(predictions, cluster_intervals):
 
 
 def normalize_duration(input, mask):
-    input = torch.exp(input)*mask
-    output = F.normalize(input, p=1, dim=-1)
+    # 수치적 안정성을 위해 최댓값을 빼줌 (Log-Sum-Exp trick과 유사)
+    input_max = torch.max(input, dim=-1, keepdim=True)[0]
+    input = torch.exp(input - input_max) * mask
+    output = input / (input.sum(dim=-1, keepdim=True) + 1e-12)
     return output
 
 def read_mapping_dict(file_path):

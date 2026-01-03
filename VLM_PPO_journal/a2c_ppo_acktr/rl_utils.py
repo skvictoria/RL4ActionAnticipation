@@ -3,6 +3,7 @@ import random
 from difflib import SequenceMatcher
 from typing import List, Optional
 import clip
+import wandb
 import torch.nn.functional as F
 from a2c_ppo_acktr.datasets.utkinect_constants import (
     UTKINECT_ACTIONS,
@@ -98,28 +99,45 @@ def _clip_safe_tokenize(text: str, device, max_words: int = 70):
 def semantic_reward_from_text(text_actions: List[str], infos, env_name: str, clip_model, device):
     if infos is None or 'utkinect' not in env_name.lower():
         return None
-    #decoded_actions = decode_text_actions(text_actions, env_name)
-    clip_model = clip_model.to(device)
-    clip_model = clip_model.float().eval()
-    try:
-        decoded_actions = text_actions[0].split('"thoughts": ')[1].split('\n')[0].replace('\n', '')
-    except:
-        decoded_actions = text_actions[0].split('"fine-grained description corresponding to each frame": ')[1].replace('\n', '')
-    
-    fine_grained_tokens = _clip_safe_tokenize(decoded_actions, device)
-    fine_grained_features = clip_model.encode_text(fine_grained_tokens)  # (B, D_clip)
-    fine_grained_features = F.normalize(fine_grained_features, dim=-1)
-    fine_grained_features = fine_grained_features.mean(dim=0) 
-    
+
+    clip_model = clip_model.to(device).float().eval()
     rewards = []
-    for pred, info in zip(decoded_actions, infos):
-        target = _normalize_label(info.get("target_next_action") if info else "")
-        target_tokens = clip.tokenize(target).to(device)
-        target = clip_model.encode_text(target_tokens)
-        target = F.normalize(target, dim=-1)
-        target = target.mean(dim=0) 
-        distance = 1 - (fine_grained_features * target).sum()  
-        rewards.append(-distance)
+
+    # 각 프로세스(환경)별로 루프를 돌아야 합니다.
+    for i, (full_text, info) in enumerate(zip(text_actions, infos)):
+        # 1. 해당 프로세스의 텍스트에서 설명 부분 추출
+        try:
+            if '"thoughts": ' in full_text:
+                desc = full_text.split('"thoughts": ')[1].split('\n')[0].replace('"', '').strip()
+            elif '"fine-grained description corresponding to each frame": ' in full_text:
+                desc = full_text.split('"fine-grained description corresponding to each frame": ')[1].split(']')[0].replace('"', '').strip()
+            else:
+                desc = full_text
+        except:
+            desc = full_text
+
+        # 2. 예측 설명(Description) 임베딩
+        with torch.no_grad():
+            pred_tokens = _clip_safe_tokenize(desc, device)
+            pred_features = clip_model.encode_text(pred_tokens)
+            pred_features = F.normalize(pred_features, dim=-1)
+
+            # 3. 정답 레이블(Target) 임베딩 
+            # 단순히 레이블만 넣기보다 "A photo of [label]" 혹은 설명을 더해주는 것이 CLIP 성능에 좋습니다.
+            target_label = _normalize_label(info.get("target_next_action") if info else "none")
+            target_text = f"A person is {target_label}" # CLIP이 더 잘 이해하는 문장 형태로 변환
+            target_tokens = clip.tokenize(target_text).to(device)
+            target_features = clip_model.encode_text(target_tokens)
+            target_features = F.normalize(target_features, dim=-1)
+
+            # 4. 거리 계산 (Cosine Similarity 기반)
+            # similarity가 1에 가까울수록(거리가 0에 가까울수록) 좋은 것
+            similarity = (pred_features * target_features).sum()
+            distance = 1.0 - similarity
+            
+            # 보상은 거리의 음수값 (-1.0 ~ 0.0 사이)
+            rewards.append(-distance.item())
+
     if not rewards:
         return None
     return torch.tensor(rewards).unsqueeze(1)

@@ -105,8 +105,8 @@ class FUTR(nn.Module):
             action_query = rearrange(ctx_emb, 'b t c -> t b c')
             tgt = torch.zeros_like(action_query)
         else:
-            tgt = rearrange(src, 't b c -> b t c')
-            tgt = torch.zeros_like(tgt)
+            #tgt = rearrange(src, 't b c -> b t c')
+            tgt = torch.zeros_like(src)
             action_query = None
         
         pos = rearrange(pos, 'b t c -> t b c')

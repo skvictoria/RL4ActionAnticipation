@@ -150,7 +150,7 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                 avg_reward = running_episode_rewards[i] / running_episode_steps[i] # [수정]
                 episode_rewards.append(running_episode_rewards[i].item())
                 # 평균 리워드가 -0.2보다 크면(유사도가 높으면) 성공으로 간주
-                episode_success_rate.append(1 if avg_reward > -0.2 else 0)
+                episode_success_rate.append(1 if avg_reward > -0.5 else 0)
                 episode_action_tokens_log_prob.append(action_tokens_log_prob[i].item())
                 
                 # 에피소드가 끝났으므로 변수 초기화

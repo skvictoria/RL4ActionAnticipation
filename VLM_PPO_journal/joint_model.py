@@ -6,7 +6,7 @@ import os
 import sys
 from types import SimpleNamespace
 from torch.nn.utils.rnn import pad_sequence
-
+import wandb
 # Add mmaam to sys.path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'mmaam'))
 
@@ -230,16 +230,27 @@ class JointFUTR:
         if inputs is None or len(valid_indices) == 0:
             return 0.0
 
+        if not torch.isfinite(inputs).all():
+            print("[Error] inputs (visual features) contains NaN/Inf")
+            return 0.0
+
         valid_fg_embed = None
         if fg_embedding is not None:
             valid_fg_list = [fg_embedding[i] for i in valid_indices]
             if valid_fg_list:
                 valid_fg_embed = torch.stack(valid_fg_list).to(self.device)
+                # [디버그 2] VLM에서 온 CLIP 임베딩 체크
+                if not torch.isfinite(valid_fg_embed).all():
+                    print("[Error] fg_embedding (VLM context) contains NaN/Inf")
                 valid_fg_embed = torch.nan_to_num(valid_fg_embed)
 
         self.optimizer.zero_grad()
         
         outputs = self.model((inputs, targets_seg), query=None, context=valid_fg_embed, mode='train')
+        # [디버그 3] 모델 출력(Logit) 체크 - 여기서 NaN이면 모델 내부 연산 문제
+        for key in ['seg', 'action', 'duration']:
+            if outputs[key] is not None and not torch.isfinite(outputs[key]).all():
+                print(f"[Error] Model output '{key}' is NaN/Inf before loss calculation")
         
         # 1. [Segmentation Loss]
         loss_seg = self.criterion_cls(outputs['seg'].view(-1, self.n_class), targets_seg.view(-1))
@@ -248,8 +259,10 @@ class JointFUTR:
         # 2. Action Anticipation Loss
         if outputs['action'] is not None:
             loss_act = self.criterion_cls(outputs['action'].view(-1, self.n_class), targets_act.view(-1))
+            val_act = loss_act.item()
         else:
             loss_act = 0.0
+            val_act = 0.0
         
         # 3. Duration Loss
         if outputs['duration'] is not None:
@@ -257,12 +270,45 @@ class JointFUTR:
             dur_mask = (targets_dur > 0).float()
             output_dur = normalize_duration(output_dur, dur_mask)
             loss_dur = torch.sum(self.criterion_reg(output_dur, targets_dur) * dur_mask) / (torch.sum(dur_mask) + 1e-6)
+            val_dur = loss_dur.item()
         else:
             loss_dur = 0.0
+            val_dur = 0.0
 
         total_loss = loss_seg + loss_act + loss_dur
+        
+        # --- [추가] Weights & Biases 상세 로깅 및 NaN 체크 ---
+        # item()으로 변환하여 값 추출
+        val_seg = loss_seg.item()
+        val_total = total_loss.item()
+
+        if wandb.run is not None:
+            wandb.log({
+                "futr_detail/loss_segmentation": val_seg,
+                "futr_detail/loss_action": val_act,
+                "futr_detail/loss_duration": val_dur,
+                "futr_detail/total_loss": val_total
+            })
+
+        # NaN이 발생하면 어떤 loss인지 콘솔에 즉시 출력
+        if np.isnan(val_total):
+            print(f"\n[!!! NaN Detected in FUTR !!!]")
+            print(f" > Seg Loss: {val_seg}")
+            print(f" > Act Loss: {val_act}")
+            print(f" > Dur Loss: {val_dur}")
+            # NaN이 발생한 원인을 찾기 위해 필요하다면 여기서 exit(1)로 멈출 수 있습니다.
+        # --------------------------------------------------
+        # [디버그 4] 최종 Loss 체크
+        if not torch.isfinite(total_loss).all():
+            #print(f"[NaN Alert] Total: {total_loss.item()}, Seg: {loss_seg.item()}, Act: {loss_act.item()}, Dur: {loss_dur.item()}")
+            # 가중치가 이미 NaN인지 확인
+            for name, param in self.model.named_parameters():
+                if torch.isnan(param).any():
+                    print(f"[Critical] Parameter '{name}' has become NaN!")
+                    break
+            return 0.0 # 역전파 건너뜀
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
         self.optimizer.step()
         
         return total_loss.item()
