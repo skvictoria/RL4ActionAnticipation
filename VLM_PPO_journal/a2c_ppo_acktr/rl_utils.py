@@ -212,9 +212,10 @@ def get_prompt(env_name, action_only, infos = None, predicted_history=None):
             raw_history = infos[0].get("action_history", [])
             history = [UTKINECT_DISPLAY.get(_normalize_label(act), act) for act in raw_history]
         history_text = ', '.join(history) if history else 'None'
-        qs = "You are analyzing RGB frames that contain coarse-level label of human action sequences. "
-        qs = qs + f"The coarse labels of the frames are: [{history_text}]. "
-        qs = qs + "Generate the corresponding fine-grained description for each coarse-level action label."
+        qs = "You are analyzing a sequence of 3 representative RGB frames from a video. "
+        qs += "Frame 1 is from the middle of the elapsed time, Frame 2 is from the 3/4 point, and Frame 3 is the current frame. "
+        qs += f"Based on these visual cues, consider the following coarse-level action labels: [{history_text}]. "
+        qs += "Generate the corresponding fine-grained description for each coarse-level action label by observing the progress across the 3 frames."
         qs = qs + " Your response should be a valid json file in the following format: \n{\n "
         if not action_only:
             qs = qs + "\"fine-grained description corresponding to each frame\": [\"label_0\", \"label_1\", ...], \n"

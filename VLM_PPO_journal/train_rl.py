@@ -67,18 +67,39 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
 
         qs = get_prompt(args.env_name, args.action_only_prompt, infos, 
                         predicted_history=limited_history)
-        qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
+        #qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
+        qs = (DEFAULT_IMAGE_TOKEN + "\n") * 3 + qs
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
         conv.append_message(conv.roles[1], None)
         curr_prompt = conv.get_prompt()
 
+        # # --- [Step 2] VLM Predicts Fine-grained Labels ---
+        # with torch.no_grad():
+        #     INPUT_IDS = tokenizer_image_token(curr_prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0)
+        #     INPUT_IDS[INPUT_IDS == 0] = 259 
+        #     value, output_id, action, action_log_prob, action_tokens_log_prob, text_outputs = actor_critic.act(
+        #             rollouts.obs[step], INPUT_IDS = INPUT_IDS)
         # --- [Step 2] VLM Predicts Fine-grained Labels ---
         with torch.no_grad():
+            # 1. 사용자 요청에 따른 글로벌 샘플링 인덱스 계산
+            # 끝(step)을 기준으로 0.5, 0.75, 1.0 지점의 인덱스를 정수로 변환하여 추출합니다.
+            history_indices = [int(step * 0.5), int(step * 0.75), step]
+            
+            # 2. RolloutStorage(rollouts.obs)에서 해당 시점들의 이미지를 추출
+            # 추출 후 형태: [3, num_processes, C, H, W] (3개 프레임)
+            multi_obs = rollouts.obs[history_indices]
+            
+            # 3. 배치(num_processes) 차원을 앞으로 보냄
+            # 변경 후 형태: [num_processes, 3, C, H, W]
+            multi_obs = multi_obs.transpose(0, 1)
+
             INPUT_IDS = tokenizer_image_token(curr_prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0)
             INPUT_IDS[INPUT_IDS == 0] = 259 
+            
+            # 4. 3장의 이미지가 담긴 multi_obs를 모델에 전달
             value, output_id, action, action_log_prob, action_tokens_log_prob, text_outputs = actor_critic.act(
-                    rollouts.obs[step], INPUT_IDS = INPUT_IDS)
+                    multi_obs, INPUT_IDS = INPUT_IDS)
         
         prev_infos = copy.deepcopy(infos)
         action_tokens_log_prob = action_tokens_log_prob.view(-1) 
@@ -91,18 +112,24 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         semantic_reward = rl_utils.semantic_reward_from_text(
             text_outputs, prev_infos, args.env_name, clip_model, reward.device)
         reward = semantic_reward.to(reward.device)
-
+        #print("Model sample output: ", text_outputs[0])
         # --- [Step 3] Update Embedding Buffer & Joint Training ---
         futr_loss = 0.0
         if joint_model is not None:
             # 1. VLM 출력 텍스트를 CLIP 임베딩으로 일괄 변환 (Batch Processing)
             clip_model = clip_model.to(reward.device).eval()
             all_tokens = []
+            
             for txt in text_outputs:
                 try:
                     clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
                 except:
                     clean_txt = txt
+                try:
+                    clean_txt = txt.replace("}", "")
+                except:
+                    clean_txt = txt
+                
                 all_tokens.append(_clip_safe_tokenize(clean_txt, reward.device))
             
             all_tokens_tensor = torch.cat(all_tokens)
@@ -177,7 +204,8 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             pred_hist_next = pred_hist_next_list[0] if pred_hist_next_list else []
             
         qs = get_prompt(args.env_name, args.action_only_prompt, infos, predicted_history=pred_hist_next)
-        qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
+        #qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
+        qs = (DEFAULT_IMAGE_TOKEN + "\n") * 3 + qs
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
         conv.append_message(conv.roles[1], None)
@@ -185,8 +213,16 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         
         NEXT_INPUT_IDS = tokenizer_image_token(next_prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0)
         NEXT_INPUT_IDS[NEXT_INPUT_IDS == 0] = 259
+        final_step = args.num_steps
+        history_indices_next = [int(final_step * 0.5), int(final_step * 0.75), final_step]
         
-        next_value = actor_critic.get_value(rollouts.obs[-1], INPUT_IDS=NEXT_INPUT_IDS).detach()
+        # rollouts.obs에서 이미지 3장을 가져와 배치 차원을 맞춰줍니다.
+        # 형태: [num_processes, 3, C, H, W]
+        multi_obs_next = rollouts.obs[history_indices_next].transpose(0, 1)
+        
+        # [수정] 단일 이미지 rollouts.obs[-1] 대신 multi_obs_next를 전달
+        next_value = actor_critic.get_value(multi_obs_next, INPUT_IDS=NEXT_INPUT_IDS).detach()
+        #next_value = actor_critic.get_value(rollouts.obs[-1], INPUT_IDS=NEXT_INPUT_IDS).detach()
 
     rollouts.compute_returns(next_value, args.use_gae, args.gamma,
                                 args.gae_lambda, args.use_proper_time_limits)

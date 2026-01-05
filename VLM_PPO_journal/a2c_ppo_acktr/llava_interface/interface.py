@@ -67,7 +67,7 @@ def llava_evaluate(value_model, input_ids, output_ids, image_tensor, temperature
     selected_log_probs = output_ids_mask*torch.take_along_dim(log_probs[:, input_token_len:-1], output_ids[:,1:].unsqueeze(2), dim = 2).squeeze(2)
     unfolded = output_ids.unfold(dimension=-1, size=3, step=1)
     target = torch.tensor([29908,2467,1115]).to(base.device)
-    # tokens for text string:'"action":' (torch.tensor([[29908,2467,1115]]))
+    # tokens for text string:'"action":' (torch.tensor([[ 29908,2467,1115]]))
     matches = (unfolded == target).all(dim = -1)
     match_index = matches.nonzero(as_tuple=True)[-1]
     if match_index.shape[0] >= 1:

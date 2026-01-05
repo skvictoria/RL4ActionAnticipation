@@ -30,8 +30,13 @@ class VLMValue(nn.Module):
         ).to(base.device, dtype=torch.float32) # [수정] float16 -> float32
 
     def forward(self, input_ids, image_tensor):
-        if image_tensor.size(0) != 1:
-            input_ids = input_ids.broadcast_to(image_tensor.size(0), input_ids.size(-1))
+        num_images_per_proc = 3
+        num_processes = image_tensor.size(0) // num_images_per_proc
+        # if image_tensor.size(0) != 1:
+        #     input_ids = input_ids.broadcast_to(image_tensor.size(0), input_ids.size(-1))
+
+        if input_ids.size(0) != num_processes:
+            input_ids = input_ids.broadcast_to(num_processes, input_ids.size(-1))
 
         image_tensor = image_tensor.to(self.base.device, dtype=self.base.dtype)
         _, _, _, _, inputs_embeds, _ = self.base.prepare_inputs_labels_for_multimodal(
@@ -79,6 +84,11 @@ class VLMPolicy(nn.Module):
 
     def process_obs(self, obs):
         #process the observation with the image processor
+        if obs.dim() == 5:
+            # 배치(N)와 이미지 수(3)를 하나로 합쳐서 4차원으로 만듭니다.
+            # 형태: [N * 3, C, H, W]
+            n_proc, n_img, c, h, w = obs.shape
+            obs = obs.view(-1, c, h, w)
         processed_images = obs
         return self.image_processor.preprocess(processed_images, return_tensors='pt')['pixel_values'].to(dtype=self.base.dtype)
 
