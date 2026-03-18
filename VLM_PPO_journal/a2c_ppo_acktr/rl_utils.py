@@ -154,7 +154,7 @@ def semantic_reward_from_text(text_actions: List[str], infos, env_name: str, cli
     if infos is None or 'utkinect' not in env_name.lower():
         return None
 
-    clip_model = clip_model.to(device).float().eval()
+    clip_model = clip_model.to(device).float().eval()  # float() 추가
     rewards = []
 
     for i, (full_text, info) in enumerate(zip(text_actions, infos)):

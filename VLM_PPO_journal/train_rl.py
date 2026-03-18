@@ -112,17 +112,22 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         # === [NEW] Predict Next Action using FUTR (for task reward) ===
         if joint_model is not None:
             # Get fine-grained embeddings from current step (4 segments)
-            clip_model_temp = clip_model.to(reward.device).eval()
+            clip_model_temp = clip_model.to(reward.device).float().eval()  # float() 추가
             fg_embs_for_pred = []
             
             for txt in text_outputs:
                 # Try to parse 4 segment descriptions
                 try:
                     import json
+                    import re
+                    
+                    # JSON 추출 전 escape 문자 정리
                     json_start = txt.find('{')
                     json_end = txt.rfind('}') + 1
                     if json_start >= 0 and json_end > json_start:
                         json_str = txt[json_start:json_end]
+                        # 잘못된 escape 문자 제거 (예: \n, \t는 유지하되 \x 같은 것은 제거)
+                        json_str = re.sub(r'\\(?!["\\/bfnrtu])', r'', json_str)
                         parsed = json.loads(json_str)
                         segment_descs = parsed.get("segment_descriptions", [])
                         
@@ -144,7 +149,7 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                             raise ValueError(f"Expected 4 descriptions, got {len(segment_descs)}")
                     else:
                         raise ValueError("No JSON found")
-                except:
+                except Exception as e:
                     # Fallback: 1개 통합 설명 → 16번 복사
                     try:
                         clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
@@ -178,7 +183,7 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         futr_loss = 0.0
         if joint_model is not None:
             # 1. VLM 출력 텍스트를 4개 segment descriptions로 파싱
-            clip_model = clip_model.to(reward.device).eval()
+            clip_model = clip_model.to(reward.device).float().eval()  # float() 추가
             
             batch_fg_sequences = [] 
             for i in range(args.num_processes):
@@ -187,11 +192,15 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                 # Try to parse JSON for 4 segment descriptions
                 try:
                     import json
+                    import re
+                    
                     # Extract JSON part
                     json_start = txt.find('{')
                     json_end = txt.rfind('}') + 1
                     if json_start >= 0 and json_end > json_start:
                         json_str = txt[json_start:json_end]
+                        # 잘못된 escape 문자 제거
+                        json_str = re.sub(r'\\(?!["\\/bfnrtu])', r'', json_str)
                         parsed = json.loads(json_str)
                         segment_descs = parsed.get("segment_descriptions", [])
                         

@@ -45,6 +45,7 @@ from joint_model import JointFUTR
 
 import clip
 clip_model, _ = clip.load("ViT-B/32", device='cuda:0')
+clip_model = clip_model.float()  # Half precision 문제 방지
 for param in clip_model.parameters():
     param.requires_grad = False
 
