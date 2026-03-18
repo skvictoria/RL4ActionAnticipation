@@ -246,8 +246,15 @@ def main():
 
     lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.lr_max_steps, eta_min=args.end_lr)
 
-    AcceleratorState().deepspeed_plugin.deepspeed_config['train_micro_batch_size_per_gpu'] = 1
-
+    # DeepSpeed 설정 수정 (CUDA 버전 불일치 문제 해결)
+    if hasattr(AcceleratorState(), 'deepspeed_plugin') and AcceleratorState().deepspeed_plugin is not None:
+        # CPU offload 비활성화하여 CUDA 버전 불일치 문제 회피
+        if 'offload_optimizer' in AcceleratorState().deepspeed_plugin.deepspeed_config:
+            AcceleratorState().deepspeed_plugin.deepspeed_config['offload_optimizer'] = {
+                "device": "none"
+            }
+        AcceleratorState().deepspeed_plugin.deepspeed_config['train_micro_batch_size_per_gpu'] = 1
+    
     actor_critic, optimizer, lr_scheduler = accelerator.prepare(actor_critic, optimizer, lr_scheduler)
 
     agent = algo.PPO(
