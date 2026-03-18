@@ -61,8 +61,12 @@ def load_lora_model(model_path, model_base = "liuhaotian/llava-v1.5-7b",load_8bi
         model.model.embed_tokens.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
 
     print('Loading additional LLaVA weights...')
+    multimodal_train = True
     if os.path.exists(os.path.join(model_path, 'non_lora_trainables.bin')):
         non_lora_trainables = torch.load(os.path.join(model_path, 'non_lora_trainables.bin'), map_location='cpu')
+    elif model_path.startswith('/') or model_path.startswith('.'):
+        multimodal_train = False
+        print(f"No non_lora_trainables.bin found at {model_path}. Skipping additional weights.")
     else:
         # this is probably from HF Hub
         from huggingface_hub import hf_hub_download
@@ -73,10 +77,11 @@ def load_lora_model(model_path, model_base = "liuhaotian/llava-v1.5-7b",load_8bi
                 subfolder=subfolder)
             return torch.load(cache_file, map_location='cpu')
         non_lora_trainables = load_from_hf(model_path, 'non_lora_trainables.bin')
-    non_lora_trainables = {(k[11:] if k.startswith('base_model.') else k): v for k, v in non_lora_trainables.items()}
-    if any(k.startswith('model.model.') for k in non_lora_trainables):
-        non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
-    model.load_state_dict(non_lora_trainables, strict=False)
+    if multimodal_train:
+        non_lora_trainables = {(k[11:] if k.startswith('base_model.') else k): v for k, v in non_lora_trainables.items()}
+        if any(k.startswith('model.model.') for k in non_lora_trainables):
+            non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
+        model.load_state_dict(non_lora_trainables, strict=False)
 
     from peft import PeftModel
     print('Loading LoRA weights...')

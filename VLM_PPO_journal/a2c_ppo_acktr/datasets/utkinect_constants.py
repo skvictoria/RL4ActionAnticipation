@@ -5,8 +5,8 @@ UTKINECT_ACTIONS = [
     "pickup",
     "carry",
     "throw",
-    "pull",
     "push",
+    "pull",
     "wavehands",
     "claphands",
 ]
@@ -18,8 +18,8 @@ UTKINECT_DISPLAY = {
     "pickup": "pickUp",
     "carry": "carry",
     "throw": "throw",
-    "pull": "pull",
     "push": "push",
+    "pull": "pull",
     "wavehands": "waveHands",
     "claphands": "clapHands",
 }

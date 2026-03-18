@@ -69,7 +69,7 @@ warnings.filterwarnings("ignore")
 
 
 def main():
-    FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_57.ckpt"
+    FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_64.ckpt"
 
     args = get_args()
 
@@ -86,12 +86,56 @@ def main():
     device = accelerator.device
     model_device = device
 
+    # Initialize Joint FUTR Model
+    joint_model = None
+    start_epoch = 0
+    vlm_lora_resume_path = None
+    utkinect_enabled = 'utkinect' in args.env_name.lower()
+    utkinect_config = None
+    if utkinect_enabled:
+        dataset_root = os.path.abspath(os.path.expanduser(args.utkinect_root))
+        if not os.path.isdir(dataset_root):
+            raise FileNotFoundError(f"UTKinect root not found: {dataset_root}")
+        utkinect_config = {
+            "dataset_root": dataset_root,
+            "split": args.utkinect_split,
+            "history_window": args.utkinect_history,
+            "frame_skip": args.utkinect_frame_skip,
+        }
+    if utkinect_enabled:
+        # 경로가 존재하는지 확인 후 로드
+        if not os.path.exists(FUTR_MODEL_PATH):
+            print(f"Warning: FUTR_MODEL_PATH {FUTR_MODEL_PATH} does not exist. Using random initialization.")
+            FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226"
+
+        else:
+            # [NEW] 파일명에서 Epoch 번호 추출 (예: ...epoch_5.ckpt -> 5)
+            match = re.search(r'epoch_(\d+)', os.path.basename(FUTR_MODEL_PATH))
+            if match:
+                loaded_epoch = int(match.group(1))
+                start_epoch = loaded_epoch + 1
+                print(f"[Main] Resuming training from epoch {start_epoch} (Loaded: {loaded_epoch})")
+                # [추가] 동일한 에포크의 VLM LoRA 경로 구성
+                # 저장 시 'vlm_lora_epoch_{j}' 형식을 사용한다고 가정합니다.
+                #vlm_resume_dir = os.path.join(args.save_dir, f"vlm_lora_epoch_{loaded_epoch}")
+                vlm_resume_dir = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/vlm_lora_epoch_60"
+                if os.path.exists(vlm_resume_dir):
+                    vlm_lora_resume_path = vlm_resume_dir
+                    print(f"[Main] Found VLM LoRA checkpoint at: {vlm_lora_resume_path}")
+            else:
+                print("[Main] Could not parse epoch from filename. Starting from 0.")
+        # Initialize
+        joint_model = JointFUTR(device, dataset_root, model_path=FUTR_MODEL_PATH, lr=1e-6)
+
+
     # initialization of llava
     model_path = args.model_path
     cache_dir = args.cache_dir
     print(model_path)
 
-    if "lora" in model_path:
+    if vlm_lora_resume_path:
+        base, tokenizer = load_lora_model(vlm_lora_resume_path, model_base=model_path, cache_dir=cache_dir)
+    elif "lora" in model_path:
         base, tokenizer = load_lora_model(model_path, cache_dir=cache_dir)
         if args.q8 or args.q4:
             raise ValueError("Lora model does not support 8bit or 4bit quantization")
@@ -147,41 +191,7 @@ def main():
     if args.use_lora:
         base = get_peft_model(base, base_lora_config)
     value_model = VLMValue(base)
-    value_model = value_model.to(model_device)
-
-    utkinect_enabled = 'utkinect' in args.env_name.lower()
-    utkinect_config = None
-    if utkinect_enabled:
-        dataset_root = os.path.abspath(os.path.expanduser(args.utkinect_root))
-        if not os.path.isdir(dataset_root):
-            raise FileNotFoundError(f"UTKinect root not found: {dataset_root}")
-        utkinect_config = {
-            "dataset_root": dataset_root,
-            "split": args.utkinect_split,
-            "history_window": args.utkinect_history,
-            "frame_skip": args.utkinect_frame_skip,
-        }
-
-    # Initialize Joint FUTR Model
-    joint_model = None
-    start_epoch = 0
-    if utkinect_enabled:
-        # 경로가 존재하는지 확인 후 로드
-        if not os.path.exists(FUTR_MODEL_PATH):
-            print(f"Warning: FUTR_MODEL_PATH {FUTR_MODEL_PATH} does not exist. Using random initialization.")
-            FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226"
-
-        else:
-            # [NEW] 파일명에서 Epoch 번호 추출 (예: ...epoch_5.ckpt -> 5)
-            match = re.search(r'epoch_(\d+)', os.path.basename(FUTR_MODEL_PATH))
-            if match:
-                loaded_epoch = int(match.group(1))
-                start_epoch = loaded_epoch + 1
-                print(f"[Main] Resuming training from epoch {start_epoch} (Loaded: {loaded_epoch})")
-            else:
-                print("[Main] Could not parse epoch from filename. Starting from 0.")
-        # Initialize
-        joint_model = JointFUTR(device, dataset_root, model_path=FUTR_MODEL_PATH, lr=1e-6)
+    value_model = value_model.to(model_device)    
 
     if "gym_cards" in args.env_name.lower():
         import gym_cards  # noqa: F401
@@ -289,9 +299,28 @@ def main():
               running_episode_rewards, running_episode_steps, episode_success_rate, episode_action_tokens_log_prob, 
               agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=joint_model)
         if joint_model is not None and (j % 1 == 0):
-            save_path = os.path.join(FUTR_MODEL_PATH.replace('futr_joint_epoch_57.ckpt', ''), f"futr_joint_epoch_{j}.ckpt")
+            save_dir_base = FUTR_MODEL_PATH.replace('futr_joint_epoch_64.ckpt', '')
+            save_path = os.path.join(save_dir_base, f"futr_joint_epoch_{j}.ckpt")
             #save_path = os.path.join(FUTR_MODEL_PATH, f"futr_joint_epoch_{j}.ckpt")
             joint_model.save_model(save_path)
+
+            # 2. [추가] VLM LoRA 가중치 저장
+            if (j % args.save_interval == 0) or (j == num_updates - 1):
+                # 가중치 저장 폴더 경로 설정
+                vlm_save_dir = os.path.join(save_dir_base, f"vlm_lora_epoch_{j}")
+                os.makedirs(vlm_save_dir, exist_ok=True)
+                
+                # 모델 unwrap 후 LoRA 가중치 저장
+                unwrapped_policy = accelerator.unwrap_model(actor_critic)
+
+                vlm_model = unwrapped_policy.value_model.base
+                
+                # [추가] 기본 모델의 config.json도 함께 저장합니다.
+                vlm_model.config.save_pretrained(vlm_save_dir)
+                # VLMPolicy -> VLMValue -> base (LlavaLlamaForCausalLM + PeftModel)
+                unwrapped_policy.value_model.base.save_pretrained(vlm_save_dir)
+                tokenizer.save_pretrained(vlm_save_dir)
+                print(f"[VLM] Saved LoRA weights to {vlm_save_dir}")
 
 if __name__ == "__main__":
     main()

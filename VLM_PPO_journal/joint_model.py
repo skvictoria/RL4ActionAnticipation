@@ -258,6 +258,7 @@ class JointFUTR:
         
         # 2. Action Anticipation Loss
         if outputs['action'] is not None:
+            print(outputs['action'].shape)
             loss_act = self.criterion_cls(outputs['action'].view(-1, self.n_class), targets_act.view(-1))
             val_act = loss_act.item()
         else:
@@ -323,15 +324,14 @@ class JointFUTR:
         Returns list of predicted action labels (one per info).
         """
         self.model.eval()
+        # [수정] _prepare_batch의 모든 반환값 수용
         inputs, targets_seg, targets_act, targets_dur, valid_indices, lengths = self._prepare_batch(infos, training=False)
         
         if inputs is None or len(valid_indices) == 0:
             return ["none"] * len(infos)
 
-        # 1. Fine-grained Embedding 준비
         valid_fg_embed = None
         if fg_embedding is not None:
-            # 배치 순서에 맞게 정렬
             valid_fg_list = [fg_embedding[i] for i in valid_indices]
             if valid_fg_list:
                 # fg_embedding shape: [B, 512] (single frame embedding)
@@ -341,26 +341,36 @@ class JointFUTR:
                 valid_fg_embed = valid_fg_embed.unsqueeze(1).repeat(1, self.args.n_query, 1)
 
         with torch.no_grad():
-            # 2. Context(fg_embed)를 넣어서 추론
             outputs = self.model(inputs, query=None, context=valid_fg_embed, mode='test')
             
-        # 3. 결과 파싱 (Next Action)
         if outputs['action'] is None:
             return ["none"] * len(infos)
-            
-        # outputs['action']: [B, n_query, C] -> 우리는 첫 번째 쿼리(바로 다음 행동)만 필요
-        act_logits = outputs['action'] 
+        # [수정] 모든 n_query에 대한 action 및 duration 추출
+        act_logits = outputs['action'] # [B, n_query, n_class]
         act_preds = act_logits.max(-1)[1].cpu().numpy() # [B, n_query]
         
-        result_future = ["none"] * len(infos)
+        dur_preds = outputs['duration'] # [B, n_query, 1]
+        if dur_preds is not None:
+            dur_preds = dur_preds.squeeze(-1).cpu().numpy() # [B, n_query]
+        else:
+            dur_preds = np.zeros_like(act_preds, dtype=np.float32)
+
+        result_future = [[] for _ in range(len(infos))]
         
         batch_idx = 0
         for i in range(len(infos)):
             if i in valid_indices:
-                # 첫 번째 쿼리(0번 인덱스)가 바로 다음 행동 예측값
-                n_act = act_preds[batch_idx][0] 
-                pred_str = self.inverse_dict.get(n_act, "none")
-                result_future[i] = pred_str
+                # [수정] n_query만큼의 모든 (행동, 지속시간) 쌍을 리스트로 저장
+                seq_preds = []
+                for q_idx in range(self.args.n_query):
+                    a_idx = act_preds[batch_idx][q_idx]
+                    d_val = dur_preds[batch_idx][q_idx]
+                    
+                    pred_str = self.inverse_dict.get(a_idx.item(), "UNDEFINED")
+                    # 패딩 인덱스 이후는 무시하거나 포함 (여기서는 모두 포함)
+                    seq_preds.append({"action": pred_str, "duration": float(d_val)})
+                
+                result_future[i] = seq_preds
                 batch_idx += 1
                 
         return result_future

@@ -16,6 +16,11 @@ def get_args():
         default=1e-8,
         help='final learning rate (default: 1e-8)')
     parser.add_argument(
+        '--save_interval',
+        type=int,
+        default=5,
+        help='save interval')
+    parser.add_argument(
         '--weight-decay',
         type=float,
         default=0,
