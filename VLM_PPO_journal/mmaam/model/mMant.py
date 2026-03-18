@@ -101,11 +101,12 @@ class FUTR(nn.Module):
         
         # Inject VLM Context (Fine-grained Label) if provided
         if context is not None:
-            ctx_emb = self.context_projector(context)
+            # context shape: [B, n_query, 512] (CLIP embeddings)
+            ctx_emb = self.context_projector(context)  # [B, n_query, hidden_dim]
             action_query = rearrange(ctx_emb, 'b t c -> t b c')
             tgt = torch.zeros_like(action_query)
         else:
-            #tgt = rearrange(src, 't b c -> b t c')
+            # No context: use zeros as target, no query
             tgt = torch.zeros_like(src)
             action_query = None
         
