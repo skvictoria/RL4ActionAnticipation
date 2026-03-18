@@ -17,6 +17,54 @@ def _normalize_label(label: Optional[str]) -> str:
     return label.strip().replace(" ", "").lower()
 
 
+def _compute_moc(predicted_seq: List[str], target_seq: List[str]) -> float:
+    """
+    Compute Mean over Classes (MoC) metric for action anticipation.
+    
+    Args:
+        predicted_seq: List of predicted action labels (length n_query)
+        target_seq: List of ground truth action labels (length n_query)
+    
+    Returns:
+        MoC score (0~1): Average per-class recall across all classes
+    """
+    if len(predicted_seq) != len(target_seq):
+        # Pad shorter sequence
+        max_len = max(len(predicted_seq), len(target_seq))
+        predicted_seq = predicted_seq + ["none"] * (max_len - len(predicted_seq))
+        target_seq = target_seq + ["none"] * (max_len - len(target_seq))
+    
+    # Normalize labels
+    pred_norm = [_normalize_label(p) for p in predicted_seq]
+    target_norm = [_normalize_label(t) for t in target_seq]
+    
+    # Get unique classes in target
+    unique_classes = set(target_norm)
+    if not unique_classes or unique_classes == {"none"}:
+        return 0.0
+    
+    # Compute per-class recall
+    class_recalls = []
+    for cls in unique_classes:
+        if cls == "none":
+            continue
+        
+        # True positives: positions where both pred and target are this class
+        tp = sum(1 for p, t in zip(pred_norm, target_norm) if p == cls and t == cls)
+        
+        # Total positives: positions where target is this class
+        total_pos = sum(1 for t in target_norm if t == cls)
+        
+        if total_pos > 0:
+            recall = tp / total_pos
+            class_recalls.append(recall)
+    
+    # Mean over all classes
+    if not class_recalls:
+        return 0.0
+    return sum(class_recalls) / len(class_recalls)
+
+
 def _needs_two_digit_guard(env_name: str) -> bool:
     return 'points' in env_name.lower()
 
@@ -101,7 +149,7 @@ def semantic_reward_from_text(text_actions: List[str], infos, env_name: str, cli
     """
     Compute reward based on:
     1. How well fine-grained text describes current coarse labels (alignment reward)
-    2. How much it improves action anticipation accuracy (task reward)
+    2. How much it improves action anticipation accuracy using MoC (task reward)
     """
     if infos is None or 'utkinect' not in env_name.lower():
         return None
@@ -137,19 +185,18 @@ def semantic_reward_from_text(text_actions: List[str], infos, env_name: str, cli
 
             # Alignment similarity (0~1 range)
             alignment_sim = (pred_features * current_features).sum().item()
-            alignment_reward = alignment_sim  # 0~1 range
+            alignment_reward = max(0.0, alignment_sim)  # Ensure non-negative
         
-        # === Part 2: Task Reward (Action Anticipation Accuracy) ===
+        # === Part 2: Task Reward (Action Anticipation with MoC) ===
         task_reward = 0.0
         if joint_model is not None and prev_infos is not None:
-            # Check if anticipation was correct
-            predicted_next = info.get("predicted_next_action", "none")
-            target_next = info.get("target_next_action", "none")
+            # Get predicted and target sequences (both are lists of 16 actions)
+            predicted_seq = info.get("predicted_future_sequence", ["none"] * 16)
+            target_seq = info.get("target_future_sequence", ["none"] * 16)
             
-            if _normalize_label(predicted_next) == _normalize_label(target_next):
-                task_reward = 1.0  # Correct anticipation
-            else:
-                task_reward = 0.0  # Wrong anticipation
+            # Compute MoC (Mean over Classes)
+            moc_score = _compute_moc(predicted_seq, target_seq)
+            task_reward = moc_score  # 0~1 range
         
         # === Combined Reward ===
         # Weight: 0.3 for alignment, 0.7 for task performance
@@ -229,22 +276,42 @@ def get_prompt(env_name, action_only, infos = None, predicted_history=None):
         elif infos and len(infos) > 0 and isinstance(infos[0], dict):
             raw_history = infos[0].get("action_history", [])
             history = [UTKINECT_DISPLAY.get(_normalize_label(act), act) for act in raw_history]
-        history_text = ', '.join(history) if history else 'None'
+        
+        # Divide history into 4 temporal segments
+        if history:
+            n = len(history)
+            segment_size = max(1, n // 4)
+            segments = [
+                history[i*segment_size:(i+1)*segment_size] if i < 3 else history[i*segment_size:]
+                for i in range(4)
+            ]
+            # Get representative label for each segment (most frequent or last)
+            segment_labels = []
+            for seg in segments:
+                if seg:
+                    # Use the last label in segment as representative
+                    segment_labels.append(seg[-1])
+                else:
+                    segment_labels.append("none")
+        else:
+            segment_labels = ["none"] * 4
         
         qs = "You are analyzing a sequence of 3 representative RGB frames from a video showing human actions. "
         qs += "Frame 1 is from the middle of the elapsed time, Frame 2 is from the 3/4 point, and Frame 3 is the current frame. "
-        qs += f"The coarse-level action labels for the observed sequence are: [{history_text}]. "
-        qs += "Your task is to generate a detailed, fine-grained description that explains HOW the person is performing these actions. "
-        qs += "Focus on body movements, posture, hand positions, and motion patterns that characterize each action. "
-        qs += "This description will be used to predict the next action the person will perform. "
+        qs += f"The observed sequence is divided into 4 temporal segments with coarse labels: {segment_labels}. "
+        qs += "Your task is to generate 4 fine-grained descriptions, one for EACH segment, explaining HOW the person performs the action. "
+        qs += "Focus on body movements, posture, hand positions, and motion patterns. "
+        qs += "These descriptions will be used to predict future actions. "
         qs = qs + "Your response should be a valid json file in the following format: \n{\n "
         if not action_only:
-            qs = qs + "\"thoughts\": \"{Provide a detailed, fine-grained description of the observed actions. "
-            qs = qs + "Describe specific body movements, gestures, and motion patterns visible across the 3 frames. "
-            qs = qs + "Be concrete and descriptive, e.g., 'The person extends their right arm forward while bending their knees' "
-            qs = qs + "rather than just repeating the coarse label.}\"\n}"
+            qs = qs + "\"segment_descriptions\": [\n"
+            qs = qs + "  \"Detailed description for segment 1 (early phase)\",\n"
+            qs = qs + "  \"Detailed description for segment 2 (mid-early phase)\",\n"
+            qs = qs + "  \"Detailed description for segment 3 (mid-late phase)\",\n"
+            qs = qs + "  \"Detailed description for segment 4 (late phase)\"\n"
+            qs = qs + "]\n}"
         else:
-            qs = qs + "\"thoughts\": \"{detailed fine-grained description}\"\n}"
+            qs = qs + "\"segment_descriptions\": [\"desc1\", \"desc2\", \"desc3\", \"desc4\"]\n}"
     
     return qs
 

@@ -95,13 +95,26 @@ class UTKinectDatasetEnv(gym.Env):
             self._current_sequence[i]["label"]
             for i in range(history_start, history_end + 1)
         ]
-        next_label = self._current_sequence[self._current_index + 1]["label"]
+        
+        # Get future action sequence (up to 16 future actions)
+        n_future = 16
+        future_actions = []
+        for offset in range(1, n_future + 1):
+            future_idx = self._current_index + offset
+            if future_idx < len(self._current_sequence):
+                future_actions.append(self._current_sequence[future_idx]["label"])
+            else:
+                future_actions.append("none")  # Padding for sequences shorter than 16
+        
+        next_label = self._current_sequence[self._current_index + 1]["label"] if self._current_index + 1 < len(self._current_sequence) else "none"
+        
         return {
             "sequence_id": self._current_sequence_id,
             "frame_index": self._current_sequence[self._current_index]["frame_index"],
             "action_history": history,
             "current_action": self._current_sequence[self._current_index]["label"],
             "target_next_action": next_label,
+            "target_future_sequence": future_actions,  # 16개 미래 행동
         }
 
     def _load_sequences(self) -> Dict[str, List[Dict]]:

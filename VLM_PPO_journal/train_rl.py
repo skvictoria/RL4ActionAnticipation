@@ -8,7 +8,8 @@ import time
 import numpy as np
 import torch
 from a2c_ppo_acktr import utils, rl_utils
-from a2c_ppo_acktr.rl_utils import get_prompt, _clip_safe_tokenize
+from a2c_ppo_acktr.rl_utils import get_prompt, _clip_safe_tokenize, _normalize_label, _compute_moc
+import a2c_ppo_acktr.rl_utils as rl_utils
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
 from llava.conversation import conv_templates
 from llava.mm_utils import tokenizer_image_token
@@ -110,30 +111,63 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         
         # === [NEW] Predict Next Action using FUTR (for task reward) ===
         if joint_model is not None:
-            # Get fine-grained embeddings from current step
+            # Get fine-grained embeddings from current step (4 segments)
             clip_model_temp = clip_model.to(reward.device).eval()
             fg_embs_for_pred = []
-            for txt in text_outputs:
-                try:
-                    clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
-                except:
-                    clean_txt = txt
-                try:
-                    clean_txt = clean_txt.replace("}", "")
-                except:
-                    pass
-                tokens = rl_utils._clip_safe_tokenize(clean_txt, reward.device)
-                with torch.no_grad():
-                    emb = clip_model_temp.encode_text(tokens).detach().cpu()
-                fg_embs_for_pred.append(emb)
             
-            # Stack and predict future action
+            for txt in text_outputs:
+                # Try to parse 4 segment descriptions
+                try:
+                    import json
+                    json_start = txt.find('{')
+                    json_end = txt.rfind('}') + 1
+                    if json_start >= 0 and json_end > json_start:
+                        json_str = txt[json_start:json_end]
+                        parsed = json.loads(json_str)
+                        segment_descs = parsed.get("segment_descriptions", [])
+                        
+                        if len(segment_descs) == 4:
+                            # Success: 4개 설명을 각각 embedding으로 변환
+                            segment_embs = []
+                            for desc in segment_descs:
+                                tokens = rl_utils._clip_safe_tokenize(str(desc), reward.device)
+                                with torch.no_grad():
+                                    emb = clip_model_temp.encode_text(tokens).detach().cpu()
+                                segment_embs.append(emb)
+                            
+                            # 각 embedding을 4번씩 복사 → 16개 시퀀스
+                            fg_sequence = []
+                            for emb in segment_embs:
+                                fg_sequence.extend([emb] * 4)
+                            fg_sequence = torch.stack(fg_sequence)  # [16, 512]
+                        else:
+                            raise ValueError(f"Expected 4 descriptions, got {len(segment_descs)}")
+                    else:
+                        raise ValueError("No JSON found")
+                except:
+                    # Fallback: 1개 통합 설명 → 16번 복사
+                    try:
+                        clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
+                    except:
+                        clean_txt = txt
+                    try:
+                        clean_txt = clean_txt.replace("}", "")
+                    except:
+                        pass
+                    tokens = rl_utils._clip_safe_tokenize(clean_txt, reward.device)
+                    with torch.no_grad():
+                        emb = clip_model_temp.encode_text(tokens).detach().cpu()
+                    fg_sequence = emb.unsqueeze(0).repeat(16, 1)  # [16, 512]
+                
+                fg_embs_for_pred.append(fg_sequence)
+            
+            # Stack: [B, 16, 512]
             fg_batch = torch.stack(fg_embs_for_pred).to(reward.device)
-            predicted_actions = joint_model.predict_future(prev_infos, fg_batch)
+            predicted_sequences = joint_model.predict_future(prev_infos, fg_batch)
             
             # Store predictions in infos for reward calculation
-            for i, pred_act in enumerate(predicted_actions):
-                infos[i]['predicted_next_action'] = pred_act
+            for i, pred_seq in enumerate(predicted_sequences):
+                infos[i]['predicted_future_sequence'] = pred_seq  # List of 16 actions
         
         # Calculate Reward (now includes anticipation accuracy)
         semantic_reward = rl_utils.semantic_reward_from_text(
@@ -143,34 +177,65 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         # --- [Step 3] Update Embedding Buffer & Joint Training ---
         futr_loss = 0.0
         if joint_model is not None:
-            # 1. VLM 출력 텍스트를 CLIP 임베딩으로 일괄 변환 (Batch Processing)
+            # 1. VLM 출력 텍스트를 4개 segment descriptions로 파싱
             clip_model = clip_model.to(reward.device).eval()
-            all_tokens = []
             
-            for txt in text_outputs:
-                try:
-                    clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
-                except:
-                    clean_txt = txt
-                try:
-                    clean_txt = txt.replace("}", "")
-                except:
-                    clean_txt = txt
-                
-                all_tokens.append(_clip_safe_tokenize(clean_txt, reward.device))
-            
-            all_tokens_tensor = torch.cat(all_tokens)
-            with torch.no_grad():
-                all_embs = clip_model.encode_text(all_tokens_tensor).detach().cpu() # [B, 512]
-
             batch_fg_sequences = [] 
             for i in range(args.num_processes):
+                txt = text_outputs[i]
+                
+                # Try to parse JSON for 4 segment descriptions
+                try:
+                    import json
+                    # Extract JSON part
+                    json_start = txt.find('{')
+                    json_end = txt.rfind('}') + 1
+                    if json_start >= 0 and json_end > json_start:
+                        json_str = txt[json_start:json_end]
+                        parsed = json.loads(json_str)
+                        segment_descs = parsed.get("segment_descriptions", [])
+                        
+                        if len(segment_descs) == 4:
+                            # Success: 4개 설명을 각각 CLIP embedding으로 변환
+                            segment_embs = []
+                            for desc in segment_descs:
+                                tokens = rl_utils._clip_safe_tokenize(str(desc), reward.device)
+                                with torch.no_grad():
+                                    emb = clip_model.encode_text(tokens).detach().cpu()
+                                segment_embs.append(emb)
+                            
+                            # 각 embedding을 4번씩 복사 → 16개 시퀀스
+                            fg_sequence = []
+                            for emb in segment_embs:
+                                fg_sequence.extend([emb] * 4)
+                            fg_sequence = torch.stack(fg_sequence)  # [16, 512]
+                        else:
+                            raise ValueError(f"Expected 4 descriptions, got {len(segment_descs)}")
+                    else:
+                        raise ValueError("No JSON found")
+                        
+                except Exception as e:
+                    # Fallback: 1개 통합 설명 → 16번 복사
+                    try:
+                        clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
+                    except:
+                        clean_txt = txt
+                    try:
+                        clean_txt = clean_txt.replace("}", "")
+                    except:
+                        pass
+                    
+                    tokens = rl_utils._clip_safe_tokenize(clean_txt, reward.device)
+                    with torch.no_grad():
+                        emb = clip_model.encode_text(tokens).detach().cpu()
+                    fg_sequence = emb.unsqueeze(0).repeat(16, 1)  # [16, 512]
+                
                 # 2. 이전 버퍼 가져오기 (없으면 초기화)
                 if 'fg_buffer' not in prev_infos[i]:
                     prev_infos[i]['fg_buffer'] = []
                 
-                # 3. 현재 프레임 임베딩 추가
-                current_emb = all_embs[i]
+                # 3. 현재 프레임 임베딩 추가 (중간 embedding 사용)
+                current_emb = fg_sequence[7]  # 8번째 (중간) embedding 사용
                 prev_infos[i]['fg_buffer'].append(current_emb)
 
                 # 4. Joint 학습을 위한 시퀀스 샘플링 (INSIGHT 방식)
@@ -222,11 +287,27 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                 "step/futr_loss": futr_loss if isinstance(futr_loss, float) else futr_loss.item()
             }
             
-            # [NEW] Log anticipation accuracy if available
+            # [NEW] Log anticipation accuracy and MoC if available
             if joint_model is not None:
-                correct_count = sum([1 for info in infos if info.get('predicted_next_action') == info.get('target_next_action')])
-                anticipation_acc = correct_count / len(infos)
-                log_dict["step/anticipation_accuracy"] = anticipation_acc
+                # Compute MoC for each process
+                moc_scores = []
+                for info in infos:
+                    pred_seq = info.get('predicted_future_sequence', ["none"] * 16)
+                    target_seq = info.get('target_future_sequence', ["none"] * 16)
+                    moc = rl_utils._compute_moc(pred_seq, target_seq)
+                    moc_scores.append(moc)
+                
+                avg_moc = sum(moc_scores) / len(moc_scores) if moc_scores else 0.0
+                log_dict["step/anticipation_moc"] = avg_moc
+                
+                # Also log first-action accuracy for comparison
+                first_correct = sum([
+                    1 for info in infos 
+                    if rl_utils._normalize_label(info.get('predicted_future_sequence', ["none"])[0]) == 
+                       rl_utils._normalize_label(info.get('target_next_action', 'none'))
+                ])
+                first_acc = first_correct / len(infos)
+                log_dict["step/first_action_accuracy"] = first_acc
             
             wandb.log(log_dict, step=total_env_steps)
 

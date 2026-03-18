@@ -258,7 +258,6 @@ class JointFUTR:
         
         # 2. Action Anticipation Loss
         if outputs['action'] is not None:
-            print(outputs['action'].shape)
             loss_act = self.criterion_cls(outputs['action'].view(-1, self.n_class), targets_act.view(-1))
             val_act = loss_act.item()
         else:
@@ -320,57 +319,51 @@ class JointFUTR:
 
     def predict_future(self, infos, fg_embedding):
         """
-        Predict next action using fine-grained context from VLM.
-        Returns list of predicted action labels (one per info).
+        Predict future action sequence using fine-grained context from VLM.
+        
+        Args:
+            infos: List of info dicts
+            fg_embedding: [B, 16, 512] tensor (4 segments × 4 repetitions)
+        
+        Returns:
+            List of predicted action sequences (n_query predictions per info).
+            Each element is a list of n_query action labels.
         """
         self.model.eval()
-        # [수정] _prepare_batch의 모든 반환값 수용
         inputs, targets_seg, targets_act, targets_dur, valid_indices, lengths = self._prepare_batch(infos, training=False)
         
         if inputs is None or len(valid_indices) == 0:
-            return ["none"] * len(infos)
+            return [["none"] * self.args.n_query for _ in range(len(infos))]
 
         valid_fg_embed = None
         if fg_embedding is not None:
+            # fg_embedding: [B, 16, 512] (already sequence form)
             valid_fg_list = [fg_embedding[i] for i in valid_indices]
             if valid_fg_list:
-                # fg_embedding shape: [B, 512] (single frame embedding)
-                # Need to expand to [B, n_query, 512] for sequence prediction
-                valid_fg_embed = torch.stack(valid_fg_list).to(self.device)
-                # Repeat for n_query times
-                valid_fg_embed = valid_fg_embed.unsqueeze(1).repeat(1, self.args.n_query, 1)
+                valid_fg_embed = torch.stack(valid_fg_list).to(self.device)  # [valid_B, 16, 512]
 
         with torch.no_grad():
             outputs = self.model(inputs, query=None, context=valid_fg_embed, mode='test')
             
         if outputs['action'] is None:
-            return ["none"] * len(infos)
-        # [수정] 모든 n_query에 대한 action 및 duration 추출
-        act_logits = outputs['action'] # [B, n_query, n_class]
+            return [["none"] * self.args.n_query for _ in range(len(infos))]
+            
+        # outputs['action']: [B, n_query, C] -> 모든 n_query 사용
+        act_logits = outputs['action'] 
         act_preds = act_logits.max(-1)[1].cpu().numpy() # [B, n_query]
         
-        dur_preds = outputs['duration'] # [B, n_query, 1]
-        if dur_preds is not None:
-            dur_preds = dur_preds.squeeze(-1).cpu().numpy() # [B, n_query]
-        else:
-            dur_preds = np.zeros_like(act_preds, dtype=np.float32)
-
-        result_future = [[] for _ in range(len(infos))]
+        result_future = [["none"] * self.args.n_query for _ in range(len(infos))]
         
         batch_idx = 0
         for i in range(len(infos)):
             if i in valid_indices:
-                # [수정] n_query만큼의 모든 (행동, 지속시간) 쌍을 리스트로 저장
-                seq_preds = []
+                # 모든 n_query 예측값을 리스트로 저장
+                pred_sequence = []
                 for q_idx in range(self.args.n_query):
-                    a_idx = act_preds[batch_idx][q_idx]
-                    d_val = dur_preds[batch_idx][q_idx]
-                    
-                    pred_str = self.inverse_dict.get(a_idx.item(), "UNDEFINED")
-                    # 패딩 인덱스 이후는 무시하거나 포함 (여기서는 모두 포함)
-                    seq_preds.append({"action": pred_str, "duration": float(d_val)})
-                
-                result_future[i] = seq_preds
+                    n_act = act_preds[batch_idx][q_idx]
+                    pred_str = self.inverse_dict.get(n_act, "none")
+                    pred_sequence.append(pred_str)
+                result_future[i] = pred_sequence
                 batch_idx += 1
                 
         return result_future
