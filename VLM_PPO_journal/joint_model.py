@@ -341,6 +341,13 @@ class JointFUTR:
             valid_fg_list = [fg_embedding[i] for i in valid_indices]
             if valid_fg_list:
                 valid_fg_embed = torch.stack(valid_fg_list).to(self.device)  # [valid_B, 16, 512]
+                
+                # Debug: Check shape
+                if valid_fg_embed.dim() != 3:
+                    print(f"[Warning] valid_fg_embed has unexpected shape: {valid_fg_embed.shape}")
+                    # Fix shape if needed
+                    if valid_fg_embed.dim() == 4:
+                        valid_fg_embed = valid_fg_embed.squeeze(2)  # [B, 16, 1, 512] -> [B, 16, 512]
 
         with torch.no_grad():
             outputs = self.model(inputs, query=None, context=valid_fg_embed, mode='test')

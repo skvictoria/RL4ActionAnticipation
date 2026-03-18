@@ -138,6 +138,9 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                                 tokens = rl_utils._clip_safe_tokenize(str(desc), reward.device)
                                 with torch.no_grad():
                                     emb = clip_model_temp.encode_text(tokens).detach().cpu()
+                                    # Ensure shape is [512] not [1, 512]
+                                    if emb.dim() > 1:
+                                        emb = emb.squeeze(0)
                                 segment_embs.append(emb)
                             
                             # 각 embedding을 4번씩 복사 → 16개 시퀀스
@@ -162,12 +165,25 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                     tokens = rl_utils._clip_safe_tokenize(clean_txt, reward.device)
                     with torch.no_grad():
                         emb = clip_model_temp.encode_text(tokens).detach().cpu()
+                        # Ensure shape is [512] not [1, 512]
+                        if emb.dim() > 1:
+                            emb = emb.squeeze(0)
                     fg_sequence = emb.unsqueeze(0).repeat(16, 1)  # [16, 512]
                 
                 fg_embs_for_pred.append(fg_sequence)
             
             # Stack: [B, 16, 512]
-            fg_batch = torch.stack(fg_embs_for_pred).to(reward.device)
+            fg_batch = torch.stack(fg_embs_for_pred)  # Remove .to(reward.device) temporarily
+            
+            # Debug: Check shape before sending to model
+            if fg_batch.dim() != 3 or fg_batch.shape[1] != 16 or fg_batch.shape[2] != 512:
+                print(f"[Warning] fg_batch has unexpected shape: {fg_batch.shape}")
+                print(f"Expected: [B, 16, 512], Got: {list(fg_batch.shape)}")
+                # Try to fix
+                if fg_batch.dim() == 4:
+                    fg_batch = fg_batch.squeeze(2)  # [B, 16, 1, 512] -> [B, 16, 512]
+            
+            fg_batch = fg_batch.to(reward.device)
             predicted_sequences = joint_model.predict_future(prev_infos, fg_batch)
             
             # Store predictions in infos for reward calculation
@@ -211,6 +227,9 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                                 tokens = rl_utils._clip_safe_tokenize(str(desc), reward.device)
                                 with torch.no_grad():
                                     emb = clip_model.encode_text(tokens).detach().cpu()
+                                    # Ensure shape is [512] not [1, 512]
+                                    if emb.dim() > 1:
+                                        emb = emb.squeeze(0)
                                 segment_embs.append(emb)
                             
                             # 각 embedding을 4번씩 복사 → 16개 시퀀스
@@ -237,6 +256,9 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                     tokens = rl_utils._clip_safe_tokenize(clean_txt, reward.device)
                     with torch.no_grad():
                         emb = clip_model.encode_text(tokens).detach().cpu()
+                        # Ensure shape is [512] not [1, 512]
+                        if emb.dim() > 1:
+                            emb = emb.squeeze(0)
                     fg_sequence = emb.unsqueeze(0).repeat(16, 1)  # [16, 512]
                 
                 # 2. 이전 버퍼 가져오기 (없으면 초기화)
