@@ -318,10 +318,15 @@ class JointFUTR:
         print(f"[JointFUTR] Saved model to {path}")
 
     def predict_future(self, infos, fg_embedding):
+        """
+        Predict next action using fine-grained context from VLM.
+        Returns list of predicted action labels (one per info).
+        """
         self.model.eval()
-        inputs, _, valid_indices = self._prepare_batch(infos, training=False)
+        inputs, targets_seg, targets_act, targets_dur, valid_indices, lengths = self._prepare_batch(infos, training=False)
         
-        if inputs is None: return []
+        if inputs is None or len(valid_indices) == 0:
+            return ["none"] * len(infos)
 
         # 1. Fine-grained Embedding 준비
         valid_fg_embed = None
@@ -329,25 +334,32 @@ class JointFUTR:
             # 배치 순서에 맞게 정렬
             valid_fg_list = [fg_embedding[i] for i in valid_indices]
             if valid_fg_list:
+                # fg_embedding shape: [B, 512] (single frame embedding)
+                # Need to expand to [B, n_query, 512] for sequence prediction
                 valid_fg_embed = torch.stack(valid_fg_list).to(self.device)
+                # Repeat for n_query times
+                valid_fg_embed = valid_fg_embed.unsqueeze(1).repeat(1, self.args.n_query, 1)
 
         with torch.no_grad():
             # 2. Context(fg_embed)를 넣어서 추론
             outputs = self.model(inputs, query=None, context=valid_fg_embed, mode='test')
             
         # 3. 결과 파싱 (Next Action)
+        if outputs['action'] is None:
+            return ["none"] * len(infos)
+            
         # outputs['action']: [B, n_query, C] -> 우리는 첫 번째 쿼리(바로 다음 행동)만 필요
         act_logits = outputs['action'] 
         act_preds = act_logits.max(-1)[1].cpu().numpy() # [B, n_query]
         
-        result_future = ["UNDEFINED"] * len(infos)
+        result_future = ["none"] * len(infos)
         
         batch_idx = 0
         for i in range(len(infos)):
             if i in valid_indices:
                 # 첫 번째 쿼리(0번 인덱스)가 바로 다음 행동 예측값
                 n_act = act_preds[batch_idx][0] 
-                pred_str = self.inverse_dict.get(n_act.item(), "UNDEFINED")
+                pred_str = self.inverse_dict.get(n_act, "none")
                 result_future[i] = pred_str
                 batch_idx += 1
                 

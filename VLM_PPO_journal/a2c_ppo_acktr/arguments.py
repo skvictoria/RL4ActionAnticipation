@@ -211,6 +211,23 @@ def get_args():
     parser.add_argument("--wandb-run", type=str, default='test')
     parser.add_argument("--q4", default=False, action='store_true')
     parser.add_argument("--q8", default=False, action='store_true')
+    
+    # Counterfactual reasoning arguments
+    parser.add_argument("--use-counterfactual", default=False, action='store_true',
+                       help='enable counterfactual action anticipation')
+    parser.add_argument("--num-counterfactuals", type=int, default=3,
+                       help='number of counterfactual actions to consider (default: 3)')
+    parser.add_argument("--cf-safety-threshold", type=float, default=0.3,
+                       help='minimum outcome score for safe actions (default: 0.3)')
+    parser.add_argument("--cf-uncertainty-penalty", type=float, default=0.1,
+                       help='penalty weight for prediction uncertainty (default: 0.1)')
+    parser.add_argument("--cf-contrastive-weight", type=float, default=0.5,
+                       help='weight for contrastive loss between factual and counterfactual (default: 0.5)')
+    parser.add_argument("--cf-outcome-weight", type=float, default=0.3,
+                       help='weight for outcome prediction loss (default: 0.3)')
+    parser.add_argument("--cf-exploration-rate", type=float, default=0.1,
+                       help='exploration rate when using counterfactual selection (default: 0.1)')
+    
     args = parser.parse_args()
 
 

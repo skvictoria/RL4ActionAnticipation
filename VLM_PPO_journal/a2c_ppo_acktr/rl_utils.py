@@ -96,19 +96,26 @@ def _clip_safe_tokenize(text: str, device, max_words: int = 70):
     # 혹시라도 다 실패하면 빈 문자열로 fallback
     return clip.tokenize("").to(device)
 
-def semantic_reward_from_text(text_actions: List[str], infos, env_name: str, clip_model, device):
+def semantic_reward_from_text(text_actions: List[str], infos, env_name: str, clip_model, device, 
+                              joint_model=None, prev_infos=None):
+    """
+    Compute reward based on:
+    1. How well fine-grained text describes current coarse labels (alignment reward)
+    2. How much it improves action anticipation accuracy (task reward)
+    """
     if infos is None or 'utkinect' not in env_name.lower():
         return None
 
     clip_model = clip_model.to(device).float().eval()
     rewards = []
 
-    # 각 프로세스(환경)별로 루프를 돌아야 합니다.
     for i, (full_text, info) in enumerate(zip(text_actions, infos)):
-        # 1. 해당 프로세스의 텍스트에서 설명 부분 추출
+        reward = 0.0
+        
+        # === Part 1: Alignment Reward (현재 coarse label과의 일치도) ===
         try:
             if '"thoughts": ' in full_text:
-                desc = full_text.split('"thoughts": ')[1].split('\n')[0].replace('"', '').strip()
+                desc = full_text.split('"thoughts": ')[1].split('}')[0].replace('"', '').strip()
             elif '"fine-grained description corresponding to each frame": ' in full_text:
                 desc = full_text.split('"fine-grained description corresponding to each frame": ')[1].split(']')[0].replace('"', '').strip()
             else:
@@ -116,27 +123,38 @@ def semantic_reward_from_text(text_actions: List[str], infos, env_name: str, cli
         except:
             desc = full_text
 
-        # 2. 예측 설명(Description) 임베딩
         with torch.no_grad():
             pred_tokens = _clip_safe_tokenize(desc, device)
             pred_features = clip_model.encode_text(pred_tokens)
             pred_features = F.normalize(pred_features, dim=-1)
 
-            # 3. 정답 레이블(Target) 임베딩 
-            # 단순히 레이블만 넣기보다 "A photo of [label]" 혹은 설명을 더해주는 것이 CLIP 성능에 좋습니다.
-            target_label = _normalize_label(info.get("target_next_action") if info else "none")
-            target_text = f"A person is {target_label}" # CLIP이 더 잘 이해하는 문장 형태로 변환
-            target_tokens = clip.tokenize(target_text).to(device)
-            target_features = clip_model.encode_text(target_tokens)
-            target_features = F.normalize(target_features, dim=-1)
+            # Current coarse label (not future!)
+            current_label = _normalize_label(info.get("current_action", "none"))
+            current_text = f"A person is {current_label}"
+            current_tokens = clip.tokenize(current_text).to(device)
+            current_features = clip_model.encode_text(current_tokens)
+            current_features = F.normalize(current_features, dim=-1)
 
-            # 4. 거리 계산 (Cosine Similarity 기반)
-            # similarity가 1에 가까울수록(거리가 0에 가까울수록) 좋은 것
-            similarity = (pred_features * target_features).sum()
-            distance = 1.0 - similarity
+            # Alignment similarity (0~1 range)
+            alignment_sim = (pred_features * current_features).sum().item()
+            alignment_reward = alignment_sim  # 0~1 range
+        
+        # === Part 2: Task Reward (Action Anticipation Accuracy) ===
+        task_reward = 0.0
+        if joint_model is not None and prev_infos is not None:
+            # Check if anticipation was correct
+            predicted_next = info.get("predicted_next_action", "none")
+            target_next = info.get("target_next_action", "none")
             
-            # 보상은 거리의 음수값 (-1.0 ~ 0.0 사이)
-            rewards.append(-distance.item())
+            if _normalize_label(predicted_next) == _normalize_label(target_next):
+                task_reward = 1.0  # Correct anticipation
+            else:
+                task_reward = 0.0  # Wrong anticipation
+        
+        # === Combined Reward ===
+        # Weight: 0.3 for alignment, 0.7 for task performance
+        reward = 0.3 * alignment_reward + 0.7 * task_reward
+        rewards.append(reward)
 
     if not rewards:
         return None
@@ -212,15 +230,21 @@ def get_prompt(env_name, action_only, infos = None, predicted_history=None):
             raw_history = infos[0].get("action_history", [])
             history = [UTKINECT_DISPLAY.get(_normalize_label(act), act) for act in raw_history]
         history_text = ', '.join(history) if history else 'None'
-        qs = "You are analyzing a sequence of 3 representative RGB frames from a video. "
+        
+        qs = "You are analyzing a sequence of 3 representative RGB frames from a video showing human actions. "
         qs += "Frame 1 is from the middle of the elapsed time, Frame 2 is from the 3/4 point, and Frame 3 is the current frame. "
-        qs += f"Based on these visual cues, consider the following coarse-level action labels: [{history_text}]. "
-        qs += "Generate the corresponding fine-grained description for each coarse-level action label by observing the progress across the 3 frames."
-        qs = qs + " Your response should be a valid json file in the following format: \n{\n "
+        qs += f"The coarse-level action labels for the observed sequence are: [{history_text}]. "
+        qs += "Your task is to generate a detailed, fine-grained description that explains HOW the person is performing these actions. "
+        qs += "Focus on body movements, posture, hand positions, and motion patterns that characterize each action. "
+        qs += "This description will be used to predict the next action the person will perform. "
+        qs = qs + "Your response should be a valid json file in the following format: \n{\n "
         if not action_only:
-            qs = qs + "\"fine-grained description corresponding to each frame\": [\"label_0\", \"label_1\", ...], \n"
-            qs = qs + "\"thoughts\": \"{describe what the person is doing and reason about the corresponding fine-grained description}\", \n"
-        #qs = qs + f"\"action\": \"one of {display_actions}\" \n}}"
+            qs = qs + "\"thoughts\": \"{Provide a detailed, fine-grained description of the observed actions. "
+            qs = qs + "Describe specific body movements, gestures, and motion patterns visible across the 3 frames. "
+            qs = qs + "Be concrete and descriptive, e.g., 'The person extends their right arm forward while bending their knees' "
+            qs = qs + "rather than just repeating the coarse label.}\"\n}"
+        else:
+            qs = qs + "\"thoughts\": \"{detailed fine-grained description}\"\n}"
     
     return qs
 

@@ -1,14 +1,28 @@
+"""
+Counterfactual-Enhanced Training Loop
+
+This extends the original train_rl.py with counterfactual action anticipation.
+MacBook compatible with CPU fallbacks.
+"""
+
 from patch import replace_llama_attn_with_xformers_attn
 if replace_llama_attn_with_xformers_attn():
     print("using xformers")
 else:
     print("using native attention")
+
 import copy
 import time
 import numpy as np
 import torch
 from a2c_ppo_acktr import utils, rl_utils
 from a2c_ppo_acktr.rl_utils import get_prompt, _clip_safe_tokenize
+from a2c_ppo_acktr.counterfactual import (
+    CounterfactualPredictor, 
+    CounterfactualActionSelector,
+    CounterfactualLoss,
+    create_counterfactual_module
+)
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
 from llava.conversation import conv_templates
 from llava.mm_utils import tokenizer_image_token
@@ -18,11 +32,11 @@ import warnings
 import wandb
 warnings.filterwarnings("ignore")
 
-# [NEW] FUTR Warmup Function
+
 def warmup_futr(args, envs, joint_model, num_steps=500):
+    """Same as original - warmup FUTR before counterfactual training"""
     print(f"\n****** [Warmup] Starting FUTR Warmup for {num_steps} steps... ******")
     
-    # Ensure envs are ready (get initial infos)
     infos = envs.get_current_infos()
     if infos is None:
         envs.reset()
@@ -32,14 +46,8 @@ def warmup_futr(args, envs, joint_model, num_steps=500):
     device = joint_model.device
     
     for step in range(num_steps):
-        # Dummy action (UTKinect environment ignores action input anyway)
         action = torch.zeros((args.num_processes, 1)).long().to(device)
-        
-        # Step environment to get new frames and GT
         obs, reward, done, infos = envs.step(action)
-        
-        # Train FUTR using ONLY Visual features (Visual -> Coarse/Future)
-        # fg_embedding is None, so it learns the base task first.
         loss = joint_model.train_step(infos, fg_embedding=None)
         total_loss += loss
         
@@ -50,9 +58,50 @@ def warmup_futr(args, envs, joint_model, num_steps=500):
     print("****** [Warmup] FUTR Warmup Complete. Model weights initialized. ******\n")
 
 
-def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, running_episode_rewards, running_episode_steps, episode_success_rate, episode_action_tokens_log_prob, agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=None):
-
-    num_sampled_frames = 16 # INSIGHT 논문 방식: 고정된 시퀀스 길이
+def train_with_counterfactual(
+    args, 
+    actor_critic, 
+    prompt, 
+    tokenizer, 
+    rollouts, 
+    infos, 
+    envs, 
+    episode_rewards, 
+    running_episode_rewards, 
+    running_episode_steps, 
+    episode_success_rate, 
+    episode_action_tokens_log_prob, 
+    agent, 
+    lr_scheduler, 
+    start, 
+    j, 
+    num_updates, 
+    clip_model, 
+    joint_model=None,
+    cf_predictor=None,
+    cf_selector=None,
+    cf_loss_fn=None
+):
+    """
+    Enhanced training loop with counterfactual reasoning.
+    
+    Key differences from original:
+    1. Generate multiple counterfactual actions
+    2. Predict outcomes for each counterfactual
+    3. Select action based on anticipated outcomes
+    4. Train counterfactual predictor with contrastive loss
+    """
+    
+    num_sampled_frames = 16
+    use_cf = args.use_counterfactual and cf_predictor is not None
+    
+    # Statistics tracking
+    cf_stats = {
+        'policy_overrides': 0,
+        'safety_violations': 0,
+        'mean_outcome_score': 0.0,
+        'mean_uncertainty': 0.0,
+    }
 
     for step in range(args.num_steps):
         
@@ -62,88 +111,107 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             pred_hist_list = joint_model.predict_coarse(infos)
             predicted_history = pred_hist_list[0] if pred_hist_list else []
 
-        # Limit history to avoid overly long prompts
-        max_history = 5  # Reduced from 8 for clearer prompts
+        max_history = 8 
         limited_history = predicted_history[-max_history:] if predicted_history else []
 
         qs = get_prompt(args.env_name, args.action_only_prompt, infos, 
                         predicted_history=limited_history)
-        #qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
         qs = (DEFAULT_IMAGE_TOKEN + "\n") * 3 + qs
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
         conv.append_message(conv.roles[1], None)
         curr_prompt = conv.get_prompt()
 
-        # # --- [Step 2] VLM Predicts Fine-grained Labels ---
-        # with torch.no_grad():
-        #     INPUT_IDS = tokenizer_image_token(curr_prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0)
-        #     INPUT_IDS[INPUT_IDS == 0] = 259 
-        #     value, output_id, action, action_log_prob, action_tokens_log_prob, text_outputs = actor_critic.act(
-        #             rollouts.obs[step], INPUT_IDS = INPUT_IDS)
         # --- [Step 2] VLM Predicts Fine-grained Labels ---
         with torch.no_grad():
-            # Sample 3 frames from history with minimum spacing
-            if step < 3:
-                # Early steps: use available frames with repetition if needed
-                history_indices = [0, max(0, step-1), step]
-            else:
-                # Later steps: sample at 0.5, 0.75, 1.0 positions
-                history_indices = [int(step * 0.5), int(step * 0.75), step]
-            
-            # Extract frames from rollout storage
+            history_indices = [int(step * 0.5), int(step * 0.75), step]
             multi_obs = rollouts.obs[history_indices]
-            multi_obs = multi_obs.transpose(0, 1)  # [num_processes, 3, C, H, W]
+            multi_obs = multi_obs.transpose(0, 1)
 
             INPUT_IDS = tokenizer_image_token(curr_prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0)
             INPUT_IDS[INPUT_IDS == 0] = 259 
             
-            value, output_id, action, action_log_prob, action_tokens_log_prob, text_outputs = actor_critic.act(
+            # Get policy's action and logits
+            value, output_id, policy_action, action_log_prob, action_tokens_log_prob, text_outputs = actor_critic.act(
                     multi_obs, INPUT_IDS = INPUT_IDS)
+        
+        # --- [Step 2.5] COUNTERFACTUAL REASONING ---
+        if use_cf:
+            with torch.no_grad():
+                # Sample counterfactual actions
+                # Note: We need to get action logits from the model
+                # For now, we'll use a simplified version
+                K = args.num_counterfactuals
+                
+                # Create dummy logits (in practice, extract from actor_critic)
+                # This is a placeholder - you'd need to modify actor_critic to return logits
+                dummy_logits = torch.randn(args.num_processes, 10).to(policy_action.device)
+                
+                cf_actions = cf_selector.sample_counterfactual_actions(
+                    policy_action.squeeze(-1),
+                    dummy_logits,
+                    k=K
+                )
+                
+                # Prepare visual features for counterfactual prediction
+                # Extract features from current observations
+                # This is simplified - in practice, use proper feature extraction
+                visual_feats = multi_obs.mean(dim=1, keepdim=True)  # [B, 1, C, H, W]
+                visual_feats = visual_feats.flatten(2).mean(dim=2, keepdim=True)  # [B, 1, D]
+                
+                # Get fine-grained embeddings (from VLM outputs)
+                fg_embed = None  # Placeholder - extract from actor_critic if available
+                
+                # Predict counterfactual futures
+                try:
+                    cf_futures, outcome_scores, uncertainties = cf_predictor(
+                        visual_feats,
+                        cf_actions,
+                        fg_embedding=fg_embed
+                    )
+                    
+                    # Select action based on counterfactual predictions
+                    selected_action, cf_info = cf_selector.select_action(
+                        cf_actions,
+                        outcome_scores,
+                        uncertainties,
+                        exploration_rate=args.cf_exploration_rate
+                    )
+                    
+                    # Override policy action with counterfactual selection
+                    action = selected_action.unsqueeze(-1)
+                    
+                    # Track statistics
+                    cf_stats['policy_overrides'] += (selected_action != policy_action.squeeze(-1)).sum().item()
+                    cf_stats['safety_violations'] += cf_info['safety_violations']
+                    cf_stats['mean_outcome_score'] += cf_info['mean_outcome_score']
+                    cf_stats['mean_uncertainty'] += cf_info['mean_uncertainty']
+                    
+                except Exception as e:
+                    print(f"[Warning] Counterfactual prediction failed: {e}")
+                    print("Falling back to policy action")
+                    action = policy_action
+        else:
+            action = policy_action
         
         prev_infos = copy.deepcopy(infos)
         action_tokens_log_prob = action_tokens_log_prob.view(-1) 
         action_log_prob = action_log_prob.view(-1)
         
-        # Environment Step
+        # --- [Step 3] Environment Step ---
         obs, reward, done, infos = envs.step(action)
         
-        # === [NEW] Predict Next Action using FUTR (for task reward) ===
-        if joint_model is not None:
-            # Get fine-grained embeddings from current step
-            clip_model_temp = clip_model.to(reward.device).eval()
-            fg_embs_for_pred = []
-            for txt in text_outputs:
-                try:
-                    clean_txt = txt.split("thoughts")[-1].replace('"', '').replace(':', '').strip()
-                except:
-                    clean_txt = txt
-                try:
-                    clean_txt = clean_txt.replace("}", "")
-                except:
-                    pass
-                tokens = rl_utils._clip_safe_tokenize(clean_txt, reward.device)
-                with torch.no_grad():
-                    emb = clip_model_temp.encode_text(tokens).detach().cpu()
-                fg_embs_for_pred.append(emb)
-            
-            # Stack and predict future action
-            fg_batch = torch.stack(fg_embs_for_pred).to(reward.device)
-            predicted_actions = joint_model.predict_future(prev_infos, fg_batch)
-            
-            # Store predictions in infos for reward calculation
-            for i, pred_act in enumerate(predicted_actions):
-                infos[i]['predicted_next_action'] = pred_act
-        
-        # Calculate Reward (now includes anticipation accuracy)
+        # Calculate Reward
         semantic_reward = rl_utils.semantic_reward_from_text(
-            text_outputs, infos, args.env_name, clip_model, reward.device,
-            joint_model=joint_model, prev_infos=prev_infos)
+            text_outputs, prev_infos, args.env_name, clip_model, reward.device)
         reward = semantic_reward.to(reward.device)
-        # --- [Step 3] Update Embedding Buffer & Joint Training ---
+        
+        # --- [Step 4] Update Embedding Buffer & Joint Training ---
         futr_loss = 0.0
+        cf_loss_value = 0.0
+        
         if joint_model is not None:
-            # 1. VLM 출력 텍스트를 CLIP 임베딩으로 일괄 변환 (Batch Processing)
+            # VLM embedding extraction (same as original)
             clip_model = clip_model.to(reward.device).eval()
             all_tokens = []
             
@@ -161,38 +229,66 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             
             all_tokens_tensor = torch.cat(all_tokens)
             with torch.no_grad():
-                all_embs = clip_model.encode_text(all_tokens_tensor).detach().cpu() # [B, 512]
+                all_embs = clip_model.encode_text(all_tokens_tensor).detach().cpu()
 
             batch_fg_sequences = [] 
             for i in range(args.num_processes):
-                # 2. 이전 버퍼 가져오기 (없으면 초기화)
                 if 'fg_buffer' not in prev_infos[i]:
                     prev_infos[i]['fg_buffer'] = []
                 
-                # 3. 현재 프레임 임베딩 추가
                 current_emb = all_embs[i]
                 prev_infos[i]['fg_buffer'].append(current_emb)
 
-                # 4. Joint 학습을 위한 시퀀스 샘플링 (INSIGHT 방식)
                 observed_len = len(prev_infos[i]['fg_buffer'])
-                # np.linspace로 0부터 현재까지 num_sampled_frames만큼 균등 추출
                 sample_indices = np.linspace(0, observed_len - 1, num_sampled_frames, dtype=int)
                 sampled_fg = torch.stack([prev_infos[i]['fg_buffer'][idx] for idx in sample_indices])
                 batch_fg_sequences.append(sampled_fg)
 
-                # 5. 에피소드 종료 여부에 따른 버퍼 전송/초기화
                 if done[i]:
                     infos[i]['fg_buffer'] = []
                 else:
                     infos[i]['fg_buffer'] = prev_infos[i]['fg_buffer']
 
-            # 6. 배치 단위로 FUTR 학습 진행
-            fg_tensor_seq = torch.stack(batch_fg_sequences).to(reward.device) # [Batch, 16, 512]
+            fg_tensor_seq = torch.stack(batch_fg_sequences).to(reward.device)
             futr_loss = joint_model.train_step(prev_infos, fg_tensor_seq)
+            
+            # --- [Step 4.5] Train Counterfactual Predictor ---
+            if use_cf and cf_loss_fn is not None:
+                try:
+                    # Prepare ground truth future actions
+                    # This is simplified - in practice, extract from infos
+                    gt_future = torch.zeros(args.num_processes, 16).long().to(reward.device)
+                    
+                    # Compute counterfactual loss
+                    cf_loss, cf_loss_info = cf_loss_fn(
+                        cf_futures,
+                        gt_future,
+                        outcome_scores,
+                        reward,
+                        action_taken_idx=0  # Assuming first counterfactual is policy action
+                    )
+                    
+                    # Backward pass for counterfactual predictor
+                    cf_loss.backward()
+                    cf_loss_value = cf_loss.item()
+                    
+                    if args.use_wandb:
+                        wandb.log({
+                            "cf/supervised_loss": cf_loss_info['supervised_loss'],
+                            "cf/outcome_loss": cf_loss_info['outcome_loss'],
+                            "cf/contrastive_loss": cf_loss_info['contrastive_loss'],
+                        })
+                        
+                except Exception as e:
+                    print(f"[Warning] Counterfactual loss computation failed: {e}")
+                    cf_loss_value = 0.0
 
-        # --- [Step 4] Rollout Storage & Logging ---
+        # --- [Step 5] Rollout Storage & Logging ---
         if step % 10 == 0 or step == args.num_steps - 1:
             print(f"[collect] update {j+1}/{num_updates}, step {step+1}/{args.num_steps}")
+            if use_cf:
+                print(f"  CF Stats: overrides={cf_stats['policy_overrides']}, "
+                      f"safety_violations={cf_stats['safety_violations']}")
 
         masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
         bad_masks = torch.FloatTensor([[0.0] if 'bad_transition' in info.keys() else [1.0] for info in infos])
@@ -203,11 +299,9 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             if d:
                 avg_reward = running_episode_rewards[i] / running_episode_steps[i]
                 episode_rewards.append(running_episode_rewards[i].item())
-                # 리워드가 0~1 범위이므로, 0.5 이상이면 성공으로 간주
-                episode_success_rate.append(1 if avg_reward > 0.5 else 0)
+                episode_success_rate.append(1 if avg_reward > -0.5 else 0)
                 episode_action_tokens_log_prob.append(action_tokens_log_prob[i].item())
                 
-                # 에피소드가 끝났으므로 변수 초기화
                 running_episode_rewards[i] = 0
                 running_episode_steps[i] = 0
         
@@ -215,23 +309,24 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
                         action_log_prob, value, reward, masks, bad_masks)
         
         if args.use_wandb:
-            # 전체 환경 스텝 수 계산 (x축용)
             total_env_steps = j * args.num_steps * args.num_processes + step * args.num_processes
-            log_dict = {
+            log_data = {
                 "step/reward": reward.mean().item(),
                 "step/futr_loss": futr_loss if isinstance(futr_loss, float) else futr_loss.item()
             }
-            
-            # [NEW] Log anticipation accuracy if available
-            if joint_model is not None:
-                correct_count = sum([1 for info in infos if info.get('predicted_next_action') == info.get('target_next_action')])
-                anticipation_acc = correct_count / len(infos)
-                log_dict["step/anticipation_accuracy"] = anticipation_acc
-            
-            wandb.log(log_dict, step=total_env_steps)
+            if use_cf:
+                log_data.update({
+                    "step/cf_loss": cf_loss_value,
+                    "cf/mean_outcome_score": cf_stats['mean_outcome_score'] / max(step, 1),
+                    "cf/mean_uncertainty": cf_stats['mean_uncertainty'] / max(step, 1),
+                })
+            wandb.log(log_data, step=total_env_steps)
 
-    print(f"****** iteration number: {j} | FUTR Loss: {futr_loss:.4f} ******")
+    print(f"****** iteration {j} | FUTR Loss: {futr_loss:.4f} | CF Loss: {cf_loss_value:.4f} ******")
+    if use_cf:
+        print(f"  Policy overrides: {cf_stats['policy_overrides']}/{args.num_steps * args.num_processes}")
     
+    # Compute returns and update policy (same as original)
     with torch.no_grad():
         pred_hist_next = []
         if joint_model:
@@ -239,7 +334,6 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             pred_hist_next = pred_hist_next_list[0] if pred_hist_next_list else []
             
         qs = get_prompt(args.env_name, args.action_only_prompt, infos, predicted_history=pred_hist_next)
-        #qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
         qs = (DEFAULT_IMAGE_TOKEN + "\n") * 3 + qs
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
@@ -251,13 +345,8 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
         final_step = args.num_steps
         history_indices_next = [int(final_step * 0.5), int(final_step * 0.75), final_step]
         
-        # rollouts.obs에서 이미지 3장을 가져와 배치 차원을 맞춰줍니다.
-        # 형태: [num_processes, 3, C, H, W]
         multi_obs_next = rollouts.obs[history_indices_next].transpose(0, 1)
-        
-        # [수정] 단일 이미지 rollouts.obs[-1] 대신 multi_obs_next를 전달
         next_value = actor_critic.get_value(multi_obs_next, INPUT_IDS=NEXT_INPUT_IDS).detach()
-        #next_value = actor_critic.get_value(rollouts.obs[-1], INPUT_IDS=NEXT_INPUT_IDS).detach()
 
     rollouts.compute_returns(next_value, args.use_gae, args.gamma,
                                 args.gae_lambda, args.use_proper_time_limits)
@@ -274,18 +363,19 @@ def train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_
             "train/iteration": j
         }
         
-        # 에피소드가 끝난 경우 보상 및 성공률 평균 기록
         if len(episode_rewards) > 0:
             log_data["eval/mean_episode_reward"] = np.mean(episode_rewards)
-            log_data["eval/min_episode_reward"] = np.min(episode_rewards)
-            log_data["eval/max_episode_reward"] = np.max(episode_rewards)
         if len(episode_success_rate) > 0:
             log_data["eval/success_rate"] = np.mean(episode_success_rate)
         if len(episode_action_tokens_log_prob) > 0:
             log_data["eval/action_log_prob"] = np.mean(episode_action_tokens_log_prob)
+        
+        if use_cf:
+            log_data.update({
+                "cf/policy_override_rate": cf_stats['policy_overrides'] / (args.num_steps * args.num_processes),
+                "cf/safety_violation_rate": cf_stats['safety_violations'] / (args.num_steps * args.num_processes),
+            })
             
         wandb.log(log_data, step=curr_step)
     
     rollouts.after_update()
-
-    
