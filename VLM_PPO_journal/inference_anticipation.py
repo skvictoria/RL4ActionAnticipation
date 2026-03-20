@@ -48,6 +48,8 @@ def load_trained_models(args, device):
     model_path = args.model_path
     cache_dir = args.cache_dir
     
+    print(f"\n1. Loading base model: {model_path}")
+    
     if "lora" in model_path:
         base, tokenizer = load_lora_model(model_path, cache_dir=cache_dir)
     else:
@@ -59,34 +61,48 @@ def load_trained_models(args, device):
     
     base.config.max_length = 1024
     image_processor = base.get_vision_tower().image_processor
+    print("✓ Base model loaded")
     
     # 2. Load trained LoRA weights for VLM
     if args.vlm_checkpoint:
-        print(f"\nLoading VLM checkpoint from: {args.vlm_checkpoint}")
-        checkpoint = torch.load(args.vlm_checkpoint, map_location=device)
+        print(f"\n2. Loading VLM checkpoint: {args.vlm_checkpoint}")
         
-        # LoRA 설정
-        base_lora_config = LoraConfig(
-            r=128,
-            lora_alpha=256,
-            target_modules=["q_proj", "v_proj"],  # 기본 설정
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        base = get_peft_model(base, base_lora_config)
+        # Check if it's a directory (LoRA weights) or a .pt file
+        if os.path.isdir(args.vlm_checkpoint):
+            # Load from directory (saved with save_pretrained)
+            print("   Loading from LoRA directory...")
+            from peft import PeftModel
+            base = PeftModel.from_pretrained(base, args.vlm_checkpoint)
+            print("✓ VLM LoRA weights loaded from directory")
         
-        # Load state dict
-        if 'actor_critic' in checkpoint:
-            base.load_state_dict(checkpoint['actor_critic'], strict=False)
-        elif 'model_state_dict' in checkpoint:
-            base.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        elif args.vlm_checkpoint.endswith('.pt'):
+            # Load from .pt file
+            print("   Loading from .pt checkpoint...")
+            checkpoint = torch.load(args.vlm_checkpoint, map_location=device)
+            
+            # Setup LoRA first
+            base_lora_config = LoraConfig(
+                r=128,
+                lora_alpha=256,
+                target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+                lora_dropout=0.05,
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+            base = get_peft_model(base, base_lora_config)
+            
+            # Load state dict
+            if 'model_state_dict' in checkpoint:
+                base.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                print(f"   Loaded from iteration: {checkpoint.get('iteration', 'unknown')}")
+            else:
+                base.load_state_dict(checkpoint, strict=False)
+            
+            print("✓ VLM checkpoint loaded from .pt file")
         else:
-            base.load_state_dict(checkpoint, strict=False)
-        
-        print("✓ VLM checkpoint loaded successfully")
+            raise ValueError(f"Unknown checkpoint format: {args.vlm_checkpoint}")
     else:
-        print("⚠ No VLM checkpoint provided, using pretrained weights only")
+        print("\n⚠ No VLM checkpoint provided, using pretrained weights only")
     
     base = base.to(device).eval()
     
@@ -95,7 +111,7 @@ def load_trained_models(args, device):
     value_model = value_model.to(device).eval()
     
     # 4. Load CLIP model
-    print("\nLoading CLIP model...")
+    print("\n3. Loading CLIP model...")
     clip_model, _ = clip.load("ViT-B/32", device=device)
     clip_model = clip_model.float().eval()
     for param in clip_model.parameters():
@@ -103,11 +119,15 @@ def load_trained_models(args, device):
     print("✓ CLIP model loaded")
     
     # 5. Load FUTR model
-    print("\nLoading FUTR model...")
+    print(f"\n4. Loading FUTR model: {args.futr_checkpoint}")
     dataset_root = os.path.abspath(os.path.expanduser(args.utkinect_root))
     joint_model = JointFUTR(device, dataset_root, model_path=args.futr_checkpoint, lr=1e-6)
     joint_model.model.eval()
     print("✓ FUTR model loaded")
+    
+    print("\n" + "=" * 80)
+    print("All models loaded successfully!")
+    print("=" * 80 + "\n")
     
     return base, tokenizer, image_processor, value_model, clip_model, joint_model
 

@@ -7,8 +7,14 @@ export PYTHONNOUSERSITE=1
 export TOKENIZERS_PARALLELISM=false
 
 # 학습된 체크포인트 경로 설정
-VLM_CHECKPOINT="./checkpoints/vlm_epoch_10.pt"  # 학습된 VLM 체크포인트
-FUTR_CHECKPOINT="/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_10.ckpt"  # 학습된 FUTR 체크포인트
+# Option 1: .pt 파일 사용 (단일 파일)
+VLM_CHECKPOINT="./checkpoints/vlm_checkpoints/vlm_epoch_10.pt"
+
+# Option 2: LoRA 디렉토리 사용 (save_pretrained로 저장된 경우)
+# VLM_CHECKPOINT="./checkpoints/vlm_checkpoints/epoch_10"
+
+# FUTR 체크포인트
+FUTR_CHECKPOINT="./checkpoints/futr_joint_epoch_10.ckpt"
 
 # 데이터셋 경로
 UTKINECT_ROOT="/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/datasets/utkinect"

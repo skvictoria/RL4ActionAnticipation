@@ -302,33 +302,56 @@ def main():
     if not os.path.exists(FUTR_MODEL_PATH):
         os.makedirs(FUTR_MODEL_PATH, exist_ok=True)
     
+    # VLM 체크포인트 저장 디렉토리 생성
+    save_dir_base = os.path.dirname(FUTR_MODEL_PATH) if os.path.isfile(FUTR_MODEL_PATH) else FUTR_MODEL_PATH
+    vlm_checkpoint_dir = os.path.join(save_dir_base, "vlm_checkpoints")
+    os.makedirs(vlm_checkpoint_dir, exist_ok=True)
+    
+    print(f"\n[Checkpoint] FUTR will be saved to: {save_dir_base}")
+    print(f"[Checkpoint] VLM will be saved to: {vlm_checkpoint_dir}")
+    print(f"[Checkpoint] Save interval: every {args.save_interval} iterations\n")
+    
     for j in tqdm(range(start_epoch, num_updates)):
         train(args, actor_critic, prompt, tokenizer, rollouts, infos, envs, episode_rewards, 
               running_episode_rewards, running_episode_steps, episode_success_rate, episode_action_tokens_log_prob, 
               agent, lr_scheduler, start, j, num_updates, clip_model, joint_model=joint_model)
-        if joint_model is not None and (j % 1 == 0):
-            save_dir_base = FUTR_MODEL_PATH.replace('futr_joint_epoch_64.ckpt', '')
-            save_path = os.path.join(save_dir_base, f"futr_joint_epoch_{j}.ckpt")
-            #save_path = os.path.join(FUTR_MODEL_PATH, f"futr_joint_epoch_{j}.ckpt")
-            joint_model.save_model(save_path)
-
-            # 2. [추가] VLM LoRA 가중치 저장
-            if (j % args.save_interval == 0) or (j == num_updates - 1):
-                # 가중치 저장 폴더 경로 설정
-                vlm_save_dir = os.path.join(save_dir_base, f"vlm_lora_epoch_{j}")
-                os.makedirs(vlm_save_dir, exist_ok=True)
-                
-                # 모델 unwrap 후 LoRA 가중치 저장
-                unwrapped_policy = accelerator.unwrap_model(actor_critic)
-
-                vlm_model = unwrapped_policy.value_model.base
-                
-                # [추가] 기본 모델의 config.json도 함께 저장합니다.
-                vlm_model.config.save_pretrained(vlm_save_dir)
-                # VLMPolicy -> VLMValue -> base (LlavaLlamaForCausalLM + PeftModel)
-                unwrapped_policy.value_model.base.save_pretrained(vlm_save_dir)
-                tokenizer.save_pretrained(vlm_save_dir)
-                print(f"[VLM] Saved LoRA weights to {vlm_save_dir}")
+        
+        # Save checkpoints
+        if (j + 1) % args.save_interval == 0 or (j == num_updates - 1):
+            print(f"\n{'='*80}")
+            print(f"Saving checkpoints at iteration {j+1}/{num_updates}")
+            print(f"{'='*80}")
+            
+            # 1. Save FUTR model
+            if joint_model is not None:
+                futr_save_path = os.path.join(save_dir_base, f"futr_joint_epoch_{j}.ckpt")
+                joint_model.save_model(futr_save_path)
+                print(f"✓ FUTR saved to: {futr_save_path}")
+            
+            # 2. Save VLM LoRA weights
+            vlm_save_dir = os.path.join(vlm_checkpoint_dir, f"epoch_{j}")
+            os.makedirs(vlm_save_dir, exist_ok=True)
+            
+            # Unwrap model from accelerator
+            unwrapped_policy = accelerator.unwrap_model(actor_critic)
+            vlm_model = unwrapped_policy.value_model.base
+            
+            # Save LoRA weights
+            vlm_model.save_pretrained(vlm_save_dir)
+            tokenizer.save_pretrained(vlm_save_dir)
+            
+            # Also save a single .pt file for easier loading
+            vlm_checkpoint_file = os.path.join(vlm_checkpoint_dir, f"vlm_epoch_{j}.pt")
+            torch.save({
+                'iteration': j,
+                'model_state_dict': vlm_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+            }, vlm_checkpoint_file)
+            
+            print(f"✓ VLM LoRA saved to: {vlm_save_dir}")
+            print(f"✓ VLM checkpoint saved to: {vlm_checkpoint_file}")
+            print(f"{'='*80}\n")
 
 if __name__ == "__main__":
     main()
