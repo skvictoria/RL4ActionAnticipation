@@ -55,9 +55,19 @@ def load_trained_models(args, device):
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_path, cache_dir=cache_dir)
         if 'mistral' in model_path.lower():
-            base = LlavaMistralForCausalLM.from_pretrained(model_path, cache_dir=cache_dir)
+            base = LlavaMistralForCausalLM.from_pretrained(
+                model_path, 
+                cache_dir=cache_dir,
+                torch_dtype=torch.float16,
+                device_map="auto"
+            )
         else:
-            base = LlavaLlamaForCausalLM.from_pretrained(model_path, cache_dir=cache_dir)
+            base = LlavaLlamaForCausalLM.from_pretrained(
+                model_path, 
+                cache_dir=cache_dir,
+                torch_dtype=torch.float16,
+                device_map="auto"
+            )
     
     base.config.max_length = 1024
     image_processor = base.get_vision_tower().image_processor
@@ -104,16 +114,17 @@ def load_trained_models(args, device):
     else:
         print("\n⚠ No VLM checkpoint provided, using pretrained weights only")
     
-    base = base.to(device).eval()
+    # Don't move to device here - model already on device with device_map="auto"
+    base.eval()
     
     # 3. Create value model (not needed for inference, but kept for compatibility)
     value_model = VLMValue(base)
-    value_model = value_model.to(device).eval()
+    value_model.eval()
     
     # 4. Load CLIP model
     print("\n3. Loading CLIP model...")
     clip_model, _ = clip.load("ViT-B/32", device=device)
-    clip_model = clip_model.float().eval()
+    clip_model = clip_model.float().eval()  # Convert to float32
     for param in clip_model.parameters():
         param.requires_grad = False
     print("✓ CLIP model loaded")
@@ -154,14 +165,17 @@ def generate_fine_grained_descriptions(vlm_model, tokenizer, image_processor, ob
     
     INPUT_IDS = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0)
     INPUT_IDS[INPUT_IDS == 0] = 259
-    INPUT_IDS = INPUT_IDS.to(device)
+    
+    # Get the actual device of the model
+    model_device = next(vlm_model.parameters()).device
+    INPUT_IDS = INPUT_IDS.to(model_device)
     
     # Generate
     with torch.no_grad():
         # obs shape: [1, 3, C, H, W] (3 frames)
         output_ids = vlm_model.generate(
             INPUT_IDS,
-            images=obs.to(device),
+            images=obs.to(model_device),
             do_sample=True,
             temperature=args.temperature,
             max_new_tokens=args.max_new_tokens,
