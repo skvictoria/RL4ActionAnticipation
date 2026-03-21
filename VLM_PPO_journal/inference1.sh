@@ -8,7 +8,7 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=0 accelerate launch \
     inference.py \
     --env-name utkinect/eval \
     --model-path liuhaotian/llava-v1.5-7b \
-    --cache_dir /home/hice1/skim3513/RL4ActionAnticipation/hf_cache \
+    --cache_dir /home/hice1/skim3513/scratch/RL4ActionAnticipation/hf_cache \
     --utkinect-root /home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/datasets/utkinect \
     --utkinect-split val \
     --utkinect-history 6 \

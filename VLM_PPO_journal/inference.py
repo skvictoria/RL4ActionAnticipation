@@ -81,7 +81,7 @@ def main():
     args.env_name = "utkinect/eval"
     args.model_path = 'liuhaotian/llava-v1.5-7b'
     args.utkinect_root = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/datasets/utkinect"
-    args.cache_dir= "/home/hice1/skim3513/RL4ActionAnticipation/hf_cache"
+    args.cache_dir= "/home/hice1/skim3513/scratch/RL4ActionAnticipation/hf_cache"
     args.use_lora = True
     args.train_vision = "all"
     EVAL_CKPT_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_76.ckpt"

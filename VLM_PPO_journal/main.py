@@ -70,8 +70,8 @@ warnings.filterwarnings("ignore")
 
 
 def main():
-    FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_64.ckpt"
-
+    FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_66.ckpt"
+    BASE_FUTR_MODEL_PATH = os.path.basename(FUTR_MODEL_PATH)
     args = get_args()
 
     torch.manual_seed(args.seed)
