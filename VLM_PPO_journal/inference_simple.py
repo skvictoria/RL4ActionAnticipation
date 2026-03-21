@@ -45,14 +45,24 @@ def load_models_safely(args, device):
     print("Loading models step by step...")
     print("=" * 80)
     
+    # Disable tokenizers parallelism to avoid deadlocks
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    
     # 1. Load tokenizer first
     print("\n[1/5] Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_path, 
-        cache_dir=args.cache_dir,
-        use_fast=False
-    )
-    print("✓ Tokenizer loaded")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_path, 
+            cache_dir=args.cache_dir,
+            use_fast=False,
+            trust_remote_code=True
+        )
+        print("✓ Tokenizer loaded")
+    except Exception as e:
+        print(f"✗ Failed to load tokenizer: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
     
     # 2. Load base model with safe settings
     print("\n[2/5] Loading base LLaVA model...")
@@ -60,22 +70,32 @@ def load_models_safely(args, device):
     print(f"  Device: {device}")
     
     try:
+        # Load with minimal memory footprint
         base = LlavaLlamaForCausalLM.from_pretrained(
             args.model_path,
             cache_dir=args.cache_dir,
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
+            trust_remote_code=True
         )
         print("✓ Base model loaded")
     except Exception as e:
         print(f"✗ Failed to load base model: {e}")
+        import traceback
+        traceback.print_exc()
         raise
     
     # Move to device
     print(f"  Moving to {device}...")
-    base = base.to(device)
-    base.eval()
-    print("✓ Model moved to device")
+    try:
+        base = base.to(device)
+        base.eval()
+        print("✓ Model moved to device")
+    except Exception as e:
+        print(f"✗ Failed to move model to device: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
     
     # 3. Load LoRA weights if provided
     if args.vlm_checkpoint:
