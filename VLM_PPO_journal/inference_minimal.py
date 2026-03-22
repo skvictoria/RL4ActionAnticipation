@@ -21,9 +21,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 print("Importing modules...")
 
-from a2c_ppo_acktr.arguments import get_args
 from a2c_ppo_acktr.envs import make_vec_envs
-from a2c_ppo_acktr.model import Policy
 from a2c_ppo_acktr.llava_interface import load_lora_model
 from a2c_ppo_acktr import rl_utils
 from joint_model import JointFUTR
@@ -39,7 +37,8 @@ def main():
     
     # Model paths
     parser.add_argument('--model-path', type=str, default='liuhaotian/llava-v1.5-7b')
-    parser.add_argument('--vlm-checkpoint', type=str, required=True)
+    parser.add_argument('--vlm-checkpoint', type=str, default=None,
+                        help='Path to VLM checkpoint (optional)')
     parser.add_argument('--futr-checkpoint', type=str, required=True)
     
     # Dataset
@@ -69,16 +68,38 @@ def main():
     # 1. Load VLM using training code's method
     print("\n[1/4] Loading VLM...")
     try:
-        from a2c_ppo_acktr.llava_interface import load_lora_model
+        # First load base model
+        print(f"  Loading base model: {args.model_path}")
+        base, tokenizer = load_lora_model(args.model_path)
+        base = base.to(device)
         
-        if os.path.isdir(args.vlm_checkpoint):
-            # LoRA directory
-            base, tokenizer = load_lora_model(args.vlm_checkpoint)
+        # Then load checkpoint if provided
+        if args.vlm_checkpoint and os.path.exists(args.vlm_checkpoint):
+            print(f"  Loading checkpoint: {args.vlm_checkpoint}")
+            
+            if os.path.isdir(args.vlm_checkpoint):
+                # Try to load LoRA weights from directory
+                try:
+                    from peft import PeftModel
+                    base = PeftModel.from_pretrained(base, args.vlm_checkpoint)
+                    print("  ✓ LoRA weights loaded from directory")
+                except Exception as e:
+                    print(f"  ⚠ Could not load LoRA from directory: {e}")
+                    print("  Continuing with base model...")
+            
+            elif args.vlm_checkpoint.endswith('.pt'):
+                # Load from .pt file
+                try:
+                    checkpoint = torch.load(args.vlm_checkpoint, map_location=device)
+                    base.load_state_dict(checkpoint.get('model_state_dict', checkpoint), strict=False)
+                    print("  ✓ Checkpoint loaded from .pt file")
+                except Exception as e:
+                    print(f"  ⚠ Could not load .pt checkpoint: {e}")
+                    print("  Continuing with base model...")
         else:
-            # Base model
-            base, tokenizer = load_lora_model(args.model_path)
+            print("  ⚠ No valid checkpoint provided, using base model only")
         
-        base = base.to(device).eval()
+        base.eval()
         print("✓ VLM loaded")
     except Exception as e:
         print(f"✗ Failed to load VLM: {e}")

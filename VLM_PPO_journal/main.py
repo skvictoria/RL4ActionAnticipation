@@ -336,9 +336,18 @@ def main():
             unwrapped_policy = accelerator.unwrap_model(actor_critic)
             vlm_model = unwrapped_policy.value_model.base
             
-            # Save LoRA weights
+            # Save LoRA weights and config
             vlm_model.save_pretrained(vlm_save_dir)
             tokenizer.save_pretrained(vlm_save_dir)
+            
+            # Save config.json explicitly (in case save_pretrained doesn't include it)
+            try:
+                config = vlm_model.config
+                config_path = os.path.join(vlm_save_dir, "config.json")
+                config.to_json_file(config_path)
+                print(f"✓ Config saved to: {config_path}")
+            except Exception as e:
+                print(f"⚠ Could not save config.json: {e}")
             
             # Also save a single .pt file for easier loading
             vlm_checkpoint_file = os.path.join(vlm_checkpoint_dir, f"vlm_epoch_{j}.pt")
