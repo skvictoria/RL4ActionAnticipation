@@ -7,8 +7,8 @@ export PYTHONNOUSERSITE=1
 export TOKENIZERS_PARALLELISM=false
 
 # 학습된 체크포인트 경로 설정
-VLM_CHECKPOINT="/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_74.ckpt"  # 학습된 VLM 체크포인트
-FUTR_CHECKPOINT="/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_74.ckpt"  # 학습된 FUTR 체크포인트
+VLM_CHECKPOINT="vlm_checkpoints/vlm_epoch_89.pt"  # 학습된 VLM 체크포인트
+FUTR_CHECKPOINT="/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_89.ckpt"  # 학습된 FUTR 체크포인트
 
 # 데이터셋 경로
 UTKINECT_ROOT="/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/datasets/utkinect"

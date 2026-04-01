@@ -21,7 +21,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 print("Importing modules...")
 
+#from a2c_ppo_acktr.arguments import get_args
 from a2c_ppo_acktr.envs import make_vec_envs
+#from a2c_ppo_acktr.model import Policy
 from a2c_ppo_acktr.llava_interface import load_lora_model
 from a2c_ppo_acktr import rl_utils
 from joint_model import JointFUTR
@@ -71,6 +73,7 @@ def main():
         # First load base model
         print(f"  Loading base model: {args.model_path}")
         base, tokenizer = load_lora_model(args.model_path)
+        print("finished")
         base = base.to(device)
         
         # Then load checkpoint if provided

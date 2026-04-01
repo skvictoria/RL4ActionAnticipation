@@ -13,7 +13,7 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=0 accelerate launch \
     --utkinect-split train \
     --utkinect-history 6 \
     --utkinect-frame-skip 1 \
-    --num-env-steps 25000 \
+    --num-env-steps 50000 \
     --num-steps 256 \
     --grad-accum-steps 16 \
     --max-new-tokens 256 \

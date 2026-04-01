@@ -1,5 +1,6 @@
 #!/bin/bash
-
+export OMP_NUM_THREADS=1
+export PYTHONNOUSERSITE=1
 # Test model loading to identify segfault source
 
 echo "Testing model loading step by step..."

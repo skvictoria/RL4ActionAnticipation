@@ -70,7 +70,7 @@ warnings.filterwarnings("ignore")
 
 
 def main():
-    FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_66.ckpt"
+    FUTR_MODEL_PATH = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_96.ckpt"
     BASE_FUTR_MODEL_PATH = os.path.basename(FUTR_MODEL_PATH)
     args = get_args()
 
@@ -119,7 +119,7 @@ def main():
                 # [추가] 동일한 에포크의 VLM LoRA 경로 구성
                 # 저장 시 'vlm_lora_epoch_{j}' 형식을 사용한다고 가정합니다.
                 #vlm_resume_dir = os.path.join(args.save_dir, f"vlm_lora_epoch_{loaded_epoch}")
-                vlm_resume_dir = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/vlm_lora_epoch_60"
+                vlm_resume_dir = "/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/vlm_lora_epoch_96"
                 if os.path.exists(vlm_resume_dir):
                     vlm_lora_resume_path = vlm_resume_dir
                     print(f"[Main] Found VLM LoRA checkpoint at: {vlm_lora_resume_path}")
