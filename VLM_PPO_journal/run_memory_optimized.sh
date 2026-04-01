@@ -1,13 +1,21 @@
 #!/bin/bash
 export OMP_NUM_THREADS=1
 export PYTHONNOUSERSITE=1
+export TOKENIZERS_PARALLELISM=false
 
-# NOTE: If resuming from a high epoch (e.g., 96), you need to increase num-env-steps
-# num_updates = num-env-steps // num-steps // num-processes
-# Example: 25000 // 256 // 1 = 97 updates
-# To train for 200 total epochs: 200 * 256 * 1 = 51200
+# 메모리 최적화 설정
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 
-TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=0 accelerate launch \
+echo "=========================================="
+echo "Memory Optimized Training Configuration"
+echo "=========================================="
+echo "num-steps: 128 (reduced from 256)"
+echo "mini-batch-size: 2 (reduced from 4)"
+echo "grad-accum-steps: 32 (increased from 16)"
+echo "CLIP: CPU-based (moved to GPU only when needed)"
+echo "=========================================="
+
+CUDA_VISIBLE_DEVICES=0 accelerate launch \
     --num_processes 1 \
     --config_file scripts/config_no_deepspeed.yaml \
     --main_process_port 29501 \
@@ -19,18 +27,18 @@ TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=0 accelerate launch \
     --utkinect-history 6 \
     --utkinect-frame-skip 1 \
     --num-env-steps 51200 \
-    --num-steps 256 \
-    --grad-accum-steps 16 \
+    --num-steps 128 \
+    --grad-accum-steps 32 \
     --max-new-tokens 256 \
     --thought-prob-coef 0.1 \
     --use-gae \
     --seed 1 \
     --temperature 0.2 \
     --ppo-epoch 4 \
-    --mini-batch-size 4 \
+    --mini-batch-size 2 \
     --use-lora \
     --train-vision none \
     --use-wandb \
     --wandb-project "ActionAnticipation_VLM" \
-    --wandb-run "experiment_1" \
+    --wandb-run "memory_optimized" \
     --save_interval 5

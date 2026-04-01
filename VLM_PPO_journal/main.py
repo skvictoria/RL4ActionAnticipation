@@ -287,6 +287,35 @@ def main():
     start = time.time()
     num_updates = int(
         args.num_env_steps) // args.num_steps // args.num_processes
+    
+    # [FIX] If resuming from checkpoint, ensure we have enough updates to train
+    if start_epoch >= num_updates:
+        print(f"\n{'='*80}")
+        print(f"⚠ WARNING: start_epoch ({start_epoch}) >= num_updates ({num_updates})")
+        print(f"Training would end immediately!")
+        print(f"")
+        print(f"Current settings:")
+        print(f"  num_env_steps: {args.num_env_steps}")
+        print(f"  num_steps: {args.num_steps}")
+        print(f"  num_processes: {args.num_processes}")
+        print(f"  Calculated num_updates: {num_updates}")
+        print(f"")
+        print(f"To continue training, you need to:")
+        print(f"  1. Increase --num-env-steps (currently {args.num_env_steps})")
+        print(f"  2. Or increase --num-steps (currently {args.num_steps})")
+        print(f"")
+        print(f"Example: --num-env-steps {int(args.num_env_steps * 2)}")
+        print(f"{'='*80}\n")
+        
+        # Ask user if they want to continue anyway
+        response = input("Continue anyway? (y/n): ")
+        if response.lower() != 'y':
+            print("Exiting...")
+            return
+    
+    print(f"\n[Training] Will train from epoch {start_epoch} to {num_updates}")
+    print(f"[Training] Total iterations: {num_updates - start_epoch}\n")
+    
     if args.use_wandb:
         import wandb
         run_name = args.wandb_run + "-" + args.env_name
