@@ -3,7 +3,6 @@ Simple Action Anticipation Inference Script (Segfault-safe version)
 
 단계별로 모델을 로드하고 테스트하는 안전한 버전
 """
-
 import os
 import sys
 import argparse
@@ -35,6 +34,8 @@ from transformers import AutoTokenizer
 import clip
 import re
 
+
+
 print("✓ All modules imported successfully")
 
 
@@ -50,10 +51,11 @@ def load_models_safely(args, device):
     
     # 1. Load tokenizer first
     print("\n[1/5] Loading tokenizer...")
+    print(args.model_path)
+    print(args.cache_dir)
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             args.model_path, 
-            cache_dir=args.cache_dir,
             use_fast=False,
             trust_remote_code=True
         )

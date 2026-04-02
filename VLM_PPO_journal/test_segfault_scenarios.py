@@ -144,7 +144,7 @@ def test_5_load_lora():
     
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--vlm-checkpoint', type=str, default='./vlm_checkpoints/epoch_4')
+    parser.add_argument('--vlm-checkpoint', type=str, default='/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/vlm_checkpoints/epoch_99')
     args = parser.parse_args()
     
     if not os.path.exists(args.vlm_checkpoint):

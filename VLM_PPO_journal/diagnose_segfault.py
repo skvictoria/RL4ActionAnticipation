@@ -12,6 +12,7 @@ import sys
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['PYTHONNOUSERSITE'] = '1'
 
 # PYTHONNOUSERSITE 테스트 (이것이 segfault를 유발할 수 있음)
 # 기본적으로 설정하지 않음 - 명령줄 인자로 제어
@@ -253,10 +254,10 @@ def test_environment():
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Diagnose segmentation fault issues')
-    parser.add_argument('--vlm-checkpoint', type=str, default='./vlm_checkpoints/epoch_4',
+    parser.add_argument('--vlm-checkpoint', type=str, default='/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/vlm_checkpoints/epoch_99',
                         help='Path to VLM checkpoint')
     parser.add_argument('--futr-checkpoint', type=str, 
-                        default='/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_66.ckpt',
+                        default='/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_99.ckpt',
                         help='Path to FUTR checkpoint')
     parser.add_argument('--dataset-root', type=str,
                         default='/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/datasets/utkinect',
