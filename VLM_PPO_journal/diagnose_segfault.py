@@ -13,6 +13,10 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 
+# PYTHONNOUSERSITE 테스트 (이것이 segfault를 유발할 수 있음)
+# 기본적으로 설정하지 않음 - 명령줄 인자로 제어
+# os.environ['PYTHONNOUSERSITE'] = '1'  # ← 이것이 문제를 일으킬 수 있음!
+
 def print_section(title):
     print("\n" + "="*80)
     print(f"{title}")
@@ -223,11 +227,28 @@ def test_environment():
         'MKL_NUM_THREADS',
         'CUDA_LAUNCH_BLOCKING',
         'CUDA_VISIBLE_DEVICES',
+        'PYTHONNOUSERSITE',  # 추가: segfault 원인일 수 있음
     ]
     
+    print("\nCurrent environment variables:")
     for var in env_vars:
         value = os.environ.get(var, 'Not set')
-        print(f"  {var}: {value}")
+        status = "⚠" if var == 'PYTHONNOUSERSITE' and value != 'Not set' else " "
+        print(f"  {status} {var}: {value}")
+    
+    # PYTHONNOUSERSITE 경고
+    if os.environ.get('PYTHONNOUSERSITE'):
+        print("\n" + "="*80)
+        print("⚠ WARNING: PYTHONNOUSERSITE is set!")
+        print("="*80)
+        print("This environment variable can cause segmentation faults with")
+        print("certain Python packages, especially transformers and tokenizers.")
+        print("")
+        print("Recommendation:")
+        print("  1. Unset this variable: unset PYTHONNOUSERSITE")
+        print("  2. Run inference without this variable")
+        print("  3. If you must use it, test with: python3 diagnose_segfault.py --test-pythonnousersite")
+        print("="*80)
 
 def main():
     import argparse
@@ -240,8 +261,30 @@ def main():
     parser.add_argument('--dataset-root', type=str,
                         default='/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/datasets/utkinect',
                         help='Path to dataset root')
+    parser.add_argument('--test-pythonnousersite', action='store_true',
+                        help='Test with PYTHONNOUSERSITE=1 (may cause segfault)')
     
     args = parser.parse_args()
+    
+    # PYTHONNOUSERSITE 테스트
+    if args.test_pythonnousersite:
+        print("\n" + "="*80)
+        print("⚠ WARNING: Testing with PYTHONNOUSERSITE=1")
+        print("="*80)
+        print("This environment variable is known to cause segmentation faults")
+        print("in some configurations. Proceeding with caution...")
+        print("="*80 + "\n")
+        os.environ['PYTHONNOUSERSITE'] = '1'
+    else:
+        # PYTHONNOUSERSITE가 이미 설정되어 있는지 확인
+        if 'PYTHONNOUSERSITE' in os.environ:
+            print("\n" + "="*80)
+            print("⚠ WARNING: PYTHONNOUSERSITE is already set in environment!")
+            print("="*80)
+            print(f"Current value: {os.environ['PYTHONNOUSERSITE']}")
+            print("This may cause segmentation faults!")
+            print("To unset: unset PYTHONNOUSERSITE")
+            print("="*80 + "\n")
     
     print("="*80)
     print("Segmentation Fault Diagnostic Tool")
@@ -288,6 +331,15 @@ def main():
     print("\n" + "="*80)
     print("Recommendations:")
     print("="*80)
+    
+    # PYTHONNOUSERSITE 경고 (최우선)
+    if os.environ.get('PYTHONNOUSERSITE'):
+        print("\n🚨 CRITICAL: PYTHONNOUSERSITE is set!")
+        print("  This is likely causing your segmentation faults!")
+        print("  Recommendation:")
+        print("  1. unset PYTHONNOUSERSITE")
+        print("  2. Restart your shell or run: export -n PYTHONNOUSERSITE")
+        print("  3. Run inference again")
     
     if results.get('tokenizer_hub') is False:
         print("\n⚠ Tokenizer from HuggingFace Hub failed!")

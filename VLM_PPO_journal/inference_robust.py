@@ -21,6 +21,11 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 
+# CRITICAL: Remove PYTHONNOUSERSITE (known to cause segfaults)
+if 'PYTHONNOUSERSITE' in os.environ:
+    print("⚠ WARNING: PYTHONNOUSERSITE detected! Removing it to prevent segfaults...")
+    del os.environ['PYTHONNOUSERSITE']
+
 # Add project paths
 sys.path.insert(0, os.path.dirname(__file__))
 

@@ -1,39 +1,38 @@
 #!/bin/bash
 
-# Robust Inference Script for Action Anticipation
-# Segmentation fault 방지를 위한 강력한 inference 실행 스크립트
+# Safe Inference without Flash Attention
+# Flash Attention 없이 안전하게 실행
 
-# Environment variables to prevent segmentation faults
+echo "========================================="
+echo "Safe Inference (No Flash Attention)"
+echo "========================================="
+echo ""
+
+# Environment variables
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export CUDA_LAUNCH_BLOCKING=1
 
-# CRITICAL: Unset PYTHONNOUSERSITE (known to cause segfaults)
+# Disable Flash Attention
+export DISABLE_FLASH_ATTN=1
+
+# Remove PYTHONNOUSERSITE
 unset PYTHONNOUSERSITE
 
-# FUTR checkpoint path
+# Paths
 FUTR_CHECKPOINT="/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_66.ckpt"
-
-# Dataset path
 UTKINECT_ROOT="/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/datasets/utkinect"
-
-# Model path (for tokenizer only)
 MODEL_PATH="liuhaotian/llava-v1.5-7b"
-
-# Output directory
-OUTPUT_DIR="./inference_results_robust"
-
-# Number of inference steps
+OUTPUT_DIR="./inference_results_no_flash"
 NUM_STEPS=100
 
-echo "========================================="
-echo "Robust Action Anticipation Inference"
-echo "========================================="
-echo "FUTR Checkpoint: $FUTR_CHECKPOINT"
-echo "Dataset: $UTKINECT_ROOT"
-echo "Output: $OUTPUT_DIR"
-echo "Steps: $NUM_STEPS"
+echo "Configuration:"
+echo "  FUTR: $FUTR_CHECKPOINT"
+echo "  Dataset: $UTKINECT_ROOT"
+echo "  Output: $OUTPUT_DIR"
+echo "  Steps: $NUM_STEPS"
+echo "  Flash Attention: DISABLED"
 echo "========================================="
 echo ""
 
@@ -51,5 +50,5 @@ python3 inference_robust.py \
 echo ""
 echo "========================================="
 echo "Inference completed!"
-echo "Results saved to: $OUTPUT_DIR"
+echo "Results: $OUTPUT_DIR"
 echo "========================================="

@@ -9,6 +9,21 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export CUDA_LAUNCH_BLOCKING=1
 
+# CRITICAL: Unset PYTHONNOUSERSITE (known to cause segfaults)
+unset PYTHONNOUSERSITE
+
+# CRITICAL: Disable Flash Attention (known to cause segfaults)
+export DISABLE_FLASH_ATTN=1
+
+echo "========================================="
+echo "Full VLM + FUTR Inference"
+echo "========================================="
+echo "This script uses your trained VLM checkpoint"
+echo "for fine-grained descriptions + FUTR for"
+echo "action anticipation."
+echo "========================================="
+echo ""
+
 # ============================================================================
 # 경로 설정 (실제 경로로 수정하세요)
 # ============================================================================
