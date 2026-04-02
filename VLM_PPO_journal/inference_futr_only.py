@@ -1,6 +1,7 @@
 """
-Working Inference Script
+FUTR-only Inference Script
 diagnose_segfault.py를 베이스로 만든 안전한 inference 스크립트
+VLM 없이 FUTR만 사용하여 segmentation fault 회피
 """
 
 import os
@@ -16,7 +17,6 @@ from tqdm import tqdm
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['PYTHONNOUSERSITE'] = '1'
 
 # Add project paths
 sys.path.insert(0, os.path.dirname(__file__))
@@ -25,95 +25,43 @@ from a2c_ppo_acktr.envs import make_vec_envs
 from a2c_ppo_acktr import rl_utils
 from joint_model import JointFUTR
 
-from transformers import AutoTokenizer
-import clip
 
-
-def load_models(args, device):
-    """diagnose_segfault.py에서 성공한 방식으로 모델 로드"""
-    
+def print_section(title):
+    """diagnose_segfault.py 스타일 출력"""
     print("\n" + "="*80)
-    print("Loading Models (Using Working Configuration)")
+    print(f"{title}")
     print("="*80)
+
+
+def load_futr_model(args, device):
+    """FUTR 모델만 로드 (diagnose_segfault.py test_futr와 동일)"""
     
-    # 1. Load Tokenizer (HuggingFace Hub 다운로드 회피)
-    print("\n[1/3] Loading Tokenizer...")
+    print_section("Loading FUTR Model")
     
-    # Option 1: Try to use already cached tokenizer
-    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-    print(f"  Checking cache: {cache_dir}")
+    if not os.path.exists(args.futr_checkpoint):
+        raise FileNotFoundError(f"FUTR checkpoint not found: {args.futr_checkpoint}")
     
-    try:
-        # Force offline mode to avoid download
-        os.environ['HF_HUB_OFFLINE'] = '1'
-        os.environ['TRANSFORMERS_OFFLINE'] = '1'
-        
-        tokenizer = AutoTokenizer.from_pretrained(
-            "liuhaotian/llava-v1.5-7b",
-            use_fast=False,
-            trust_remote_code=True,
-            local_files_only=True  # Don't download
-        )
-        print(f"✓ Tokenizer loaded from cache: vocab size = {len(tokenizer)}")
-        
-    except Exception as e:
-        print(f"  Cache not found: {e}")
-        print(f"  Creating minimal tokenizer...")
-        
-        # Fallback: Create a minimal tokenizer
-        from transformers import LlamaTokenizer
-        try:
-            tokenizer = LlamaTokenizer.from_pretrained(
-                "huggyllama/llama-7b",
-                use_fast=False,
-                local_files_only=True
-            )
-            print(f"✓ Fallback tokenizer loaded: vocab size = {len(tokenizer)}")
-        except Exception as e2:
-            print(f"✗ All tokenizer loading methods failed")
-            print(f"  Error: {e2}")
-            raise RuntimeError("Cannot load tokenizer. Please download manually first.")
+    if not os.path.exists(args.dataset_root):
+        raise FileNotFoundError(f"Dataset root not found: {args.dataset_root}")
     
-    # 2. Load CLIP (diagnose_segfault.py와 동일)
-    print("\n[2/3] Loading CLIP...")
-    try:
-        clip_model, _ = clip.load("ViT-B/32", device=device)
-        clip_model = clip_model.float().eval()
-        for param in clip_model.parameters():
-            param.requires_grad = False
-        print("✓ CLIP model loaded")
-    except Exception as e:
-        print(f"✗ CLIP loading failed: {e}")
-        raise
+    print(f"FUTR checkpoint: {args.futr_checkpoint}")
+    print(f"Dataset root: {args.dataset_root}")
+    print(f"Device: {device}")
     
-    # 3. Load FUTR (diagnose_segfault.py와 동일)
-    print(f"\n[3/3] Loading FUTR...")
-    print(f"  Checkpoint: {args.futr_checkpoint}")
-    print(f"  Dataset: {args.dataset_root}")
     try:
         joint_model = JointFUTR(device, args.dataset_root, model_path=args.futr_checkpoint, lr=1e-6)
         joint_model.model.eval()
-        print("✓ FUTR model loaded")
+        print("✓ FUTR model loaded successfully")
+        return joint_model
     except Exception as e:
         print(f"✗ FUTR loading failed: {e}")
         raise
-    
-    print("\n" + "="*80)
-    print("✓ All models loaded successfully!")
-    print("="*80 + "\n")
-    
-    return tokenizer, clip_model, joint_model
 
 
-def run_inference(args, models, device):
-    """FUTR-only inference 실행"""
+def create_environment(args, device):
+    """환경 생성"""
     
-    tokenizer, clip_model, joint_model = models
-    
-    # Create environment
-    print("="*80)
-    print("Creating Environment...")
-    print("="*80)
+    print_section("Creating Environment")
     
     utkinect_config = {
         "dataset_root": args.dataset_root,
@@ -122,17 +70,30 @@ def run_inference(args, models, device):
         "frame_skip": args.frame_skip,
     }
     
-    print(f"  Dataset: {utkinect_config['dataset_root']}")
-    print(f"  Split: {utkinect_config['split']}")
-    print(f"  History window: {utkinect_config['history_window']}")
-    print(f"  Frame skip: {utkinect_config['frame_skip']}")
+    print(f"Environment: {args.env_name}")
+    print(f"Dataset: {utkinect_config['dataset_root']}")
+    print(f"Split: {utkinect_config['split']}")
+    print(f"History window: {utkinect_config['history_window']}")
+    print(f"Frame skip: {utkinect_config['frame_skip']}")
     
     envs = make_vec_envs(
         args.env_name, args.seed, 1,
         args.gamma, None, device, False, 1,
         utkinect_config=utkinect_config
     )
-    print("✓ Environment created\n")
+    print("✓ Environment created successfully")
+    
+    return envs
+
+
+def run_inference(args, joint_model, envs, device):
+    """FUTR-only inference 실행"""
+    
+    print_section("Starting FUTR-only Inference")
+    
+    print(f"Number of steps: {args.num_steps}")
+    print(f"Note: Using visual features only (no VLM)")
+    print("")
     
     # Reset environment
     obs = envs.reset()
@@ -146,13 +107,6 @@ def run_inference(args, models, device):
     # Per-class statistics
     class_correct = {}
     class_total = {}
-    
-    print("="*80)
-    print("Starting FUTR-only Inference")
-    print("="*80)
-    print(f"Number of steps: {args.num_steps}")
-    print(f"Note: Using visual features only (no VLM)")
-    print("="*80 + "\n")
     
     for step in tqdm(range(args.num_steps), desc="Inference"):
         try:
@@ -205,7 +159,7 @@ def run_inference(args, models, device):
                 infos = envs.get_current_infos()
             
             # Print progress
-            if (step + 1) % 50 == 0:
+            if (step + 1) % 20 == 0:
                 avg_moc = total_moc / num_samples
                 avg_first_acc = total_first_acc / num_samples
                 print(f"\n[Progress] Step {step+1}/{args.num_steps}")
@@ -227,9 +181,8 @@ def run_inference(args, models, device):
     for cls in class_total:
         per_class_acc[cls] = class_correct[cls] / class_total[cls] if class_total[cls] > 0 else 0.0
     
-    print("\n" + "="*80)
-    print("Inference Complete!")
-    print("="*80)
+    print_section("Inference Complete!")
+    
     print(f"Total samples: {num_samples}")
     print(f"Average MoC: {avg_moc:.4f}")
     print(f"Average First-Action Accuracy: {avg_first_acc:.4f}")
@@ -237,7 +190,6 @@ def run_inference(args, models, device):
     for cls in sorted(per_class_acc.keys()):
         print(f"  {cls}: {per_class_acc[cls]:.4f} ({class_correct[cls]}/{class_total[cls]})")
     print("\nNote: This is FUTR-only baseline (no VLM)")
-    print("="*80 + "\n")
     
     stats = {
         "avg_moc": float(avg_moc),
@@ -253,19 +205,21 @@ def run_inference(args, models, device):
 def save_results(results, stats, output_dir):
     """결과 저장"""
     
+    print_section("Saving Results")
+    
     os.makedirs(output_dir, exist_ok=True)
     
     # Save detailed results
     results_file = os.path.join(output_dir, "inference_results.json")
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
-    print(f"✓ Detailed results saved to: {results_file}")
+    print(f"✓ Detailed results: {results_file}")
     
     # Save statistics
     stats_file = os.path.join(output_dir, "inference_stats.json")
     with open(stats_file, 'w') as f:
         json.dump(stats, f, indent=2)
-    print(f"✓ Statistics saved to: {stats_file}")
+    print(f"✓ Statistics: {stats_file}")
     
     # Save summary
     summary_file = os.path.join(output_dir, "inference_summary.txt")
@@ -282,11 +236,11 @@ def save_results(results, stats, output_dir):
             count = stats['per_class_counts'][cls]
             f.write(f"  {cls}: {acc:.4f} ({count} samples)\n")
         f.write("\nNote: This is FUTR-only baseline without VLM\n")
-    print(f"✓ Summary saved to: {summary_file}")
+    print(f"✓ Summary: {summary_file}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Working Inference (from diagnose_segfault.py)')
+    parser = argparse.ArgumentParser(description='FUTR-only Inference (from diagnose_segfault.py)')
     
     # Paths (diagnose_segfault.py와 동일한 기본값)
     parser.add_argument('--futr-checkpoint', type=str,
@@ -309,7 +263,7 @@ def main():
     # Inference settings
     parser.add_argument('--num-steps', type=int, default=100,
                         help='Number of inference steps')
-    parser.add_argument('--output-dir', type=str, default='./inference_results_working',
+    parser.add_argument('--output-dir', type=str, default='./inference_results_futr_only',
                         help='Output directory')
     
     # Other
@@ -323,19 +277,14 @@ def main():
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    print("\n" + "="*80)
-    print("Working Inference Script")
-    print("="*80)
+    print_section("FUTR-only Inference Script")
     print("Based on diagnose_segfault.py (which works without errors)")
-    print("="*80)
-    print(f"Device: {device}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"\nDevice: {device}")
     if torch.cuda.is_available():
         print(f"CUDA device: {torch.cuda.get_device_name(0)}")
-    print(f"Environment variables:")
-    print(f"  PYTHONNOUSERSITE: {os.environ.get('PYTHONNOUSERSITE')}")
+    print(f"\nEnvironment variables:")
+    print(f"  PYTHONNOUSERSITE: {os.environ.get('PYTHONNOUSERSITE', 'Not set')}")
     print(f"  TOKENIZERS_PARALLELISM: {os.environ.get('TOKENIZERS_PARALLELISM')}")
-    print("="*80 + "\n")
     
     # Set seed
     torch.manual_seed(args.seed)
@@ -343,27 +292,24 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
     
     try:
-        # Load models (diagnose_segfault.py와 동일한 방식)
-        models = load_models(args, device)
+        # Load FUTR model (diagnose_segfault.py와 동일한 방식)
+        joint_model = load_futr_model(args, device)
+        
+        # Create environment
+        envs = create_environment(args, device)
         
         # Run inference
-        results, stats = run_inference(args, models, device)
+        results, stats = run_inference(args, joint_model, envs, device)
         
         # Save results
         save_results(results, stats, args.output_dir)
         
-        print("\n" + "="*80)
-        print("✓ Inference completed successfully!")
-        print("="*80)
+        print_section("✓ Inference Completed Successfully!")
         print(f"Results saved to: {args.output_dir}")
-        print("="*80 + "\n")
         
     except Exception as e:
-        print(f"\n{'='*80}")
-        print(f"✗ Error during inference")
-        print(f"{'='*80}")
+        print_section("✗ Error During Inference")
         print(f"{e}")
-        print(f"{'='*80}\n")
         import traceback
         traceback.print_exc()
         sys.exit(1)

@@ -43,32 +43,71 @@ def load_models(args, device):
     print("Loading Models (VLM + FUTR)")
     print("="*80)
     
-    # 1. Load Tokenizer (diagnose_segfault.py와 동일)
+    # 1. Load Tokenizer (로컬 우선, Hub fallback)
     print("\n[1/5] Loading Tokenizer...")
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            "liuhaotian/llava-v1.5-7b",
-            use_fast=False,
-            trust_remote_code=True
-        )
-        print(f"✓ Tokenizer loaded: vocab size = {len(tokenizer)}")
+        # Try local VLM checkpoint first (if available)
+        if args.vlm_checkpoint and os.path.exists(args.vlm_checkpoint):
+            tokenizer_path = args.vlm_checkpoint
+            print(f"  Trying local checkpoint: {tokenizer_path}")
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    tokenizer_path,
+                    use_fast=False,
+                    trust_remote_code=True,
+                    local_files_only=True
+                )
+                print(f"✓ Tokenizer loaded from local checkpoint: vocab size = {len(tokenizer)}")
+            except Exception as e:
+                print(f"  Local checkpoint failed: {e}")
+                print(f"  Falling back to HuggingFace Hub...")
+                tokenizer = AutoTokenizer.from_pretrained(
+                    "liuhaotian/llava-v1.5-7b",
+                    use_fast=False,
+                    trust_remote_code=True,
+                    local_files_only=False
+                )
+                print(f"✓ Tokenizer loaded from Hub: vocab size = {len(tokenizer)}")
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(
+                "liuhaotian/llava-v1.5-7b",
+                use_fast=False,
+                trust_remote_code=True,
+                local_files_only=False
+            )
+            print(f"✓ Tokenizer loaded: vocab size = {len(tokenizer)}")
     except Exception as e:
         print(f"✗ Tokenizer loading failed: {e}")
         raise
     
-    # 2. Load Base LLaVA Model (새로 추가)
+    # 2. Load Base LLaVA Model (로컬 우선)
     print("\n[2/5] Loading Base LLaVA Model...")
     try:
+        # Try to use local cache first
+        print("  Attempting to load from local cache...")
         base_model = LlavaLlamaForCausalLM.from_pretrained(
             "liuhaotian/llava-v1.5-7b",
             torch_dtype=torch.float16,
-            device_map="auto"
+            device_map="auto",
+            local_files_only=True  # Use cache only, no download
         )
         base_model.config.max_length = 1024
-        print("✓ Base LLaVA model loaded")
+        print("✓ Base LLaVA model loaded from cache")
     except Exception as e:
-        print(f"✗ Base model loading failed: {e}")
-        raise
+        print(f"  Cache loading failed: {e}")
+        print("  Attempting to download from Hub...")
+        try:
+            base_model = LlavaLlamaForCausalLM.from_pretrained(
+                "liuhaotian/llava-v1.5-7b",
+                torch_dtype=torch.float16,
+                device_map="auto",
+                local_files_only=False
+            )
+            base_model.config.max_length = 1024
+            print("✓ Base LLaVA model loaded from Hub")
+        except Exception as e2:
+            print(f"✗ Base model loading failed: {e2}")
+            raise
     
     # 3. Load LoRA Weights (새로 추가)
     if args.vlm_checkpoint and os.path.exists(args.vlm_checkpoint):

@@ -1,6 +1,6 @@
 """
-Working Inference Script
-diagnose_segfault.py를 베이스로 만든 안전한 inference 스크립트
+Inference without Tokenizer Loading
+Tokenizer 로딩을 완전히 우회하는 FUTR-only inference
 """
 
 import os
@@ -12,11 +12,13 @@ from pathlib import Path
 import json
 from tqdm import tqdm
 
-# diagnose_segfault.py와 동일한 환경 변수 설정
+# 환경 변수 설정
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['PYTHONNOUSERSITE'] = '1'
+os.environ['HF_HUB_OFFLINE'] = '1'  # Offline mode
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
 
 # Add project paths
 sys.path.insert(0, os.path.dirname(__file__))
@@ -25,57 +27,18 @@ from a2c_ppo_acktr.envs import make_vec_envs
 from a2c_ppo_acktr import rl_utils
 from joint_model import JointFUTR
 
-from transformers import AutoTokenizer
 import clip
 
 
 def load_models(args, device):
-    """diagnose_segfault.py에서 성공한 방식으로 모델 로드"""
+    """Tokenizer 없이 CLIP + FUTR만 로드"""
     
     print("\n" + "="*80)
-    print("Loading Models (Using Working Configuration)")
+    print("Loading Models (No Tokenizer)")
     print("="*80)
     
-    # 1. Load Tokenizer (HuggingFace Hub 다운로드 회피)
-    print("\n[1/3] Loading Tokenizer...")
-    
-    # Option 1: Try to use already cached tokenizer
-    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-    print(f"  Checking cache: {cache_dir}")
-    
-    try:
-        # Force offline mode to avoid download
-        os.environ['HF_HUB_OFFLINE'] = '1'
-        os.environ['TRANSFORMERS_OFFLINE'] = '1'
-        
-        tokenizer = AutoTokenizer.from_pretrained(
-            "liuhaotian/llava-v1.5-7b",
-            use_fast=False,
-            trust_remote_code=True,
-            local_files_only=True  # Don't download
-        )
-        print(f"✓ Tokenizer loaded from cache: vocab size = {len(tokenizer)}")
-        
-    except Exception as e:
-        print(f"  Cache not found: {e}")
-        print(f"  Creating minimal tokenizer...")
-        
-        # Fallback: Create a minimal tokenizer
-        from transformers import LlamaTokenizer
-        try:
-            tokenizer = LlamaTokenizer.from_pretrained(
-                "huggyllama/llama-7b",
-                use_fast=False,
-                local_files_only=True
-            )
-            print(f"✓ Fallback tokenizer loaded: vocab size = {len(tokenizer)}")
-        except Exception as e2:
-            print(f"✗ All tokenizer loading methods failed")
-            print(f"  Error: {e2}")
-            raise RuntimeError("Cannot load tokenizer. Please download manually first.")
-    
-    # 2. Load CLIP (diagnose_segfault.py와 동일)
-    print("\n[2/3] Loading CLIP...")
+    # 1. Load CLIP
+    print("\n[1/2] Loading CLIP...")
     try:
         clip_model, _ = clip.load("ViT-B/32", device=device)
         clip_model = clip_model.float().eval()
@@ -86,8 +49,8 @@ def load_models(args, device):
         print(f"✗ CLIP loading failed: {e}")
         raise
     
-    # 3. Load FUTR (diagnose_segfault.py와 동일)
-    print(f"\n[3/3] Loading FUTR...")
+    # 2. Load FUTR
+    print(f"\n[2/2] Loading FUTR...")
     print(f"  Checkpoint: {args.futr_checkpoint}")
     print(f"  Dataset: {args.dataset_root}")
     try:
@@ -102,13 +65,13 @@ def load_models(args, device):
     print("✓ All models loaded successfully!")
     print("="*80 + "\n")
     
-    return tokenizer, clip_model, joint_model
+    return clip_model, joint_model
 
 
 def run_inference(args, models, device):
     """FUTR-only inference 실행"""
     
-    tokenizer, clip_model, joint_model = models
+    clip_model, joint_model = models
     
     # Create environment
     print("="*80)
@@ -124,8 +87,6 @@ def run_inference(args, models, device):
     
     print(f"  Dataset: {utkinect_config['dataset_root']}")
     print(f"  Split: {utkinect_config['split']}")
-    print(f"  History window: {utkinect_config['history_window']}")
-    print(f"  Frame skip: {utkinect_config['frame_skip']}")
     
     envs = make_vec_envs(
         args.env_name, args.seed, 1,
@@ -151,7 +112,7 @@ def run_inference(args, models, device):
     print("Starting FUTR-only Inference")
     print("="*80)
     print(f"Number of steps: {args.num_steps}")
-    print(f"Note: Using visual features only (no VLM)")
+    print(f"Note: Using visual features only (no VLM, no Tokenizer)")
     print("="*80 + "\n")
     
     for step in tqdm(range(args.num_steps), desc="Inference"):
@@ -205,7 +166,7 @@ def run_inference(args, models, device):
                 infos = envs.get_current_infos()
             
             # Print progress
-            if (step + 1) % 50 == 0:
+            if (step + 1) % 20 == 0:
                 avg_moc = total_moc / num_samples
                 avg_first_acc = total_first_acc / num_samples
                 print(f"\n[Progress] Step {step+1}/{args.num_steps}")
@@ -236,7 +197,7 @@ def run_inference(args, models, device):
     print(f"\nPer-class First-Action Accuracy:")
     for cls in sorted(per_class_acc.keys()):
         print(f"  {cls}: {per_class_acc[cls]:.4f} ({class_correct[cls]}/{class_total[cls]})")
-    print("\nNote: This is FUTR-only baseline (no VLM)")
+    print("\nNote: FUTR-only baseline (no VLM, no Tokenizer)")
     print("="*80 + "\n")
     
     stats = {
@@ -281,14 +242,14 @@ def save_results(results, stats, output_dir):
             acc = stats['per_class_accuracy'][cls]
             count = stats['per_class_counts'][cls]
             f.write(f"  {cls}: {acc:.4f} ({count} samples)\n")
-        f.write("\nNote: This is FUTR-only baseline without VLM\n")
+        f.write("\nNote: FUTR-only baseline (no VLM, no Tokenizer)\n")
     print(f"✓ Summary saved to: {summary_file}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Working Inference (from diagnose_segfault.py)')
+    parser = argparse.ArgumentParser(description='Inference without Tokenizer (FUTR-only)')
     
-    # Paths (diagnose_segfault.py와 동일한 기본값)
+    # Paths
     parser.add_argument('--futr-checkpoint', type=str,
                         default='/home/hice1/skim3513/scratch/darai-anticipation/FUTR_proposed/save_dir/utkinects/long/model/transformer/1/i3d_transcript/runs0/_20_30_50_erank_40p_64_latent_20251226/futr_joint_epoch_99.ckpt',
                         help='Path to FUTR checkpoint')
@@ -297,26 +258,18 @@ def main():
                         help='Path to UTKinect dataset')
     
     # Dataset settings
-    parser.add_argument('--env-name', type=str, default='utkinect/test',
-                        help='Environment name')
-    parser.add_argument('--split', type=str, default='test',
-                        help='Dataset split')
-    parser.add_argument('--history-window', type=int, default=6,
-                        help='History window size')
-    parser.add_argument('--frame-skip', type=int, default=1,
-                        help='Frame skip')
+    parser.add_argument('--env-name', type=str, default='utkinect/test')
+    parser.add_argument('--split', type=str, default='test')
+    parser.add_argument('--history-window', type=int, default=6)
+    parser.add_argument('--frame-skip', type=int, default=1)
     
     # Inference settings
-    parser.add_argument('--num-steps', type=int, default=100,
-                        help='Number of inference steps')
-    parser.add_argument('--output-dir', type=str, default='./inference_results_working',
-                        help='Output directory')
+    parser.add_argument('--num-steps', type=int, default=100)
+    parser.add_argument('--output-dir', type=str, default='./inference_results_no_tokenizer')
     
     # Other
-    parser.add_argument('--seed', type=int, default=1,
-                        help='Random seed')
-    parser.add_argument('--gamma', type=float, default=0.99,
-                        help='Discount factor')
+    parser.add_argument('--seed', type=int, default=1)
+    parser.add_argument('--gamma', type=float, default=0.99)
     
     args = parser.parse_args()
     
@@ -324,17 +277,14 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     print("\n" + "="*80)
-    print("Working Inference Script")
+    print("Inference without Tokenizer (FUTR-only)")
     print("="*80)
-    print("Based on diagnose_segfault.py (which works without errors)")
+    print("Completely avoids HuggingFace Hub download")
     print("="*80)
     print(f"Device: {device}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"CUDA device: {torch.cuda.get_device_name(0)}")
     print(f"Environment variables:")
     print(f"  PYTHONNOUSERSITE: {os.environ.get('PYTHONNOUSERSITE')}")
-    print(f"  TOKENIZERS_PARALLELISM: {os.environ.get('TOKENIZERS_PARALLELISM')}")
+    print(f"  HF_HUB_OFFLINE: {os.environ.get('HF_HUB_OFFLINE')}")
     print("="*80 + "\n")
     
     # Set seed
@@ -343,7 +293,7 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
     
     try:
-        # Load models (diagnose_segfault.py와 동일한 방식)
+        # Load models (no Tokenizer)
         models = load_models(args, device)
         
         # Run inference
